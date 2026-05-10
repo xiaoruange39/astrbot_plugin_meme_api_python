@@ -1,0 +1,173 @@
+{
+  "meme_api_base_url": {
+    "description": "meme-generator API 地址",
+    "hint": "用于表情列表、详情、随机表情和制作表情。",
+    "type": "string",
+    "default": "http://127.0.0.1:2233"
+  },
+  "meme_request_timeout": {
+    "description": "meme API 请求超时秒数",
+    "hint": "生成复杂表情时可适当调大。",
+    "type": "int",
+    "default": 30
+  },
+  "meme_info_concurrency": {
+    "description": "表情信息加载并发数",
+    "hint": "启动或刷新表情信息时并发请求详情的数量。",
+    "type": "int",
+    "default": 8
+  },
+  "meme_refresh_verbose_log": {
+    "description": "显示详细刷新日志",
+    "hint": "关闭时只输出开始、总数和完成日志；开启后输出每个表情的获取进度。",
+    "type": "bool",
+    "default": false
+  },
+  "meme_shortcut_enabled": {
+    "description": "启用表情快捷指令",
+    "hint": "开启后会尝试匹配 meme API 返回的关键词和快捷正则。",
+    "type": "bool",
+    "default": true
+  },
+  "meme_poke_random_enabled": {
+    "description": "戳一戳发送随机表情",
+    "hint": "开启后，用户戳机器人时自动发送一张随机表情包。",
+    "type": "bool",
+    "default": false
+  },
+  "meme_auto_default_texts": {
+    "description": "自动使用默认文字",
+    "hint": "制作表情时未提供文字则自动使用 meme API 返回的默认文字。",
+    "type": "bool",
+    "default": true
+  },
+  "meme_auto_sender_avatar": {
+    "description": "自动使用发送者头像",
+    "hint": "制作单头像表情且未提供图片时，自动使用发送者 QQ 头像。",
+    "type": "bool",
+    "default": true
+  },
+  "meme_list_text_template": {
+    "description": "表情列表文字模板",
+    "hint": "传给 meme-generator 的 render_list 接口。默认前面显示序号，方便统计数量。",
+    "type": "string",
+    "default": "{index}. {keywords}"
+  },
+  "meme_list_sort_by": {
+    "description": "表情列表排序方式",
+    "hint": "控制表情列表图片中的排序。",
+    "type": "string",
+    "options": ["创建时间", "更新时间", "名称", "关键词"],
+    "default": "创建时间"
+  },
+  "meme_list_sort_reverse": {
+    "description": "表情列表倒序排列",
+    "hint": "开启后最新的创建/更新时间排在前面；名称和关键词则按倒序排列。",
+    "type": "bool",
+    "default": true
+  },
+  "repo_list": {
+    "description": "表情包仓库列表",
+    "hint": "每一项都是一条仓库配置，可在网页里新增、删除或复制。",
+    "type": "template_list",
+    "templates": {
+      "repo_item": {
+        "name": "仓库配置",
+        "hint": "填写仓库地址和对应数据目录",
+        "items": {
+          "url": {
+            "type": "string",
+            "description": "GitHub 仓库地址",
+            "default": "https://github.com/anyliew/meme_emoji"
+          },
+          "data_dir": {
+            "type": "string",
+            "description": "表情包数据目录",
+            "default": "/root/memeapi/meme_emoji/emoji"
+          }
+        }
+      }
+    },
+    "default": [
+      {
+        "__template_key": "repo_item",
+        "url": "https://github.com/anyliew/meme_emoji",
+        "data_dir": "/root/memeapi/meme_emoji/emoji"
+      },
+      {
+        "__template_key": "repo_item",
+        "url": "https://github.com/jinjiao007/meme-generator-jj",
+        "data_dir": "/root/memeapi/meme-generator-jj/memes"
+      },
+      {
+        "__template_key": "repo_item",
+        "url": "https://github.com/anyliew/meme_emoji_nsfw",
+        "data_dir": "/root/memeapi/meme_emoji_nsfw/emoji"
+      },
+      {
+        "__template_key": "repo_item",
+        "url": "https://github.com/LRZ9712/tudou-meme",
+        "data_dir": "/root/memeapi/tudou-meme/meme"
+      },
+      {
+        "__template_key": "repo_item",
+        "url": "https://github.com/xiaoruange39/xiaoruan-meme",
+        "data_dir": "/root/memeapi/xiaoruan-meme/emoji"
+      },
+      {
+        "__template_key": "repo_item",
+        "url": "https://github.com/MemeCrafters/meme-generator-contrib",
+        "data_dir": "/root/memeapi/meme-generator-contrib/memes"
+      }
+    ]
+  },
+  "docker_container": {
+    "description": "memeapi 容器名",
+    "hint": "填写实际容器名，插件会直接重启这个容器。",
+    "type": "string",
+    "default": "meme-generator"
+  },
+  "remote_enabled": {
+    "description": "启用远程服务器（实验性）",
+    "hint": "开启后，更新和重启命令会通过 SSH 在远程服务器执行。",
+    "type": "bool",
+    "default": false
+  },
+  "remote_auth_mode": {
+    "description": "远程认证方式",
+    "hint": "选择私钥登录或密码登录。",
+    "type": "string",
+    "options": ["私钥登录", "密码登录"],
+    "default": "私钥登录"
+  },
+  "remote_host": {
+    "description": "远程主机地址",
+    "hint": "例如 1.2.3.4 或 example.com。",
+    "type": "string",
+    "default": ""
+  },
+  "remote_user": {
+    "description": "远程用户名",
+    "hint": "例如 root。",
+    "type": "string",
+    "default": "root"
+  },
+  "remote_port": {
+    "description": "SSH 端口",
+    "hint": "默认 22。",
+    "type": "int",
+    "default": 22
+  },
+  "remote_password": {
+    "description": "SSH 密码（可选）",
+    "hint": "如果不想用私钥，可以直接填密码；留空则使用系统默认 SSH 认证。",
+    "type": "string",
+    "default": ""
+  },
+  "remote_workdir": {
+    "description": "远程工作目录",
+    "hint": "远程 memeapi 根目录，仓库路径会在这里执行。",
+    "type": "string",
+    "default": "/root/memeapi"
+  }
+}
