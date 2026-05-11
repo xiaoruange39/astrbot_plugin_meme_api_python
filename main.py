@@ -26,6 +26,9 @@ import astrbot.api.message_components as Comp
 # 基础配置常量
 SCREEN_SESSION = "meme-generator"
 TEMP_IMAGE_TTL_SECONDS = 3600
+COMMAND_TIMEOUT_SECONDS = 120
+MAX_IMAGE_DOWNLOAD_CONCURRENCY = 4
+MIRAGETANK_KEY = "miragetank"
 
 DEFAULT_REPO_SPECS = [
     {
@@ -92,7 +95,7 @@ def split_arg_string(arg_string: str) -> list[str]:
     out_quote = None
     escape_next = False
 
-    for index, char in enumerate(arg_string):
+    for char in arg_string:
         if escape_next:
             current.append(char)
             escape_next = False
@@ -104,8 +107,6 @@ def split_arg_string(arg_string: str) -> list[str]:
             if char == out_quote:
                 in_quote = None
                 out_quote = None
-            elif char == in_quote:
-                raise ArgSyntaxError(f"参数中第 {index} 个字符的引号不匹配：{char}")
             else:
                 current.append(char)
             continue
@@ -321,7 +322,7 @@ class MemeUpdater(Star):
                 except OSError:
                     pass
 
-    async def _run_repo_cmd(self, cmd: list[str] | str, cwd: str = None, remote: bool = False) -> tuple[int, str]:
+    async def _run_repo_cmd(self, cmd: list[str] | str, cwd: str | None = None, remote: bool = False) -> tuple[int, str]:
         if remote:
             remote_cmd = self._shell_join(cmd) if isinstance(cmd, list) else cmd
             if cwd:
@@ -331,7 +332,7 @@ class MemeUpdater(Star):
             return await self._run_cmd(cmd, cwd=cwd)
         return await self._run_shell_cmd(cmd, cwd=cwd)
 
-    async def _run_cmd(self, cmd: list[str], cwd: str = None, env: dict | None = None) -> tuple[int, str]:
+    async def _run_cmd(self, cmd: list[str], cwd: str | None = None, env: dict | None = None) -> tuple[int, str]:
         run_env = os.environ.copy()
         if env:
             run_env.update(env)
@@ -342,10 +343,15 @@ class MemeUpdater(Star):
             cwd=cwd,
             env=run_env,
         )
-        stdout, _ = await proc.communicate()
-        return proc.returncode, stdout.decode("utf-8", errors="replace").strip()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return -1, f"命令执行超时（{COMMAND_TIMEOUT_SECONDS}秒）"
+        return int(proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
 
-    async def _run_shell_cmd(self, cmd: str, cwd: str = None, env: dict | None = None) -> tuple[int, str]:
+    async def _run_shell_cmd(self, cmd: str, cwd: str | None = None, env: dict | None = None) -> tuple[int, str]:
         run_env = os.environ.copy()
         if env:
             run_env.update(env)
@@ -356,8 +362,13 @@ class MemeUpdater(Star):
             cwd=cwd,
             env=run_env,
         )
-        stdout, _ = await proc.communicate()
-        return proc.returncode, stdout.decode("utf-8", errors="replace").strip()
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return -1, f"命令执行超时（{COMMAND_TIMEOUT_SECONDS}秒）"
+        return int(proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
 
     def _format_time(self, dt: datetime) -> str:
         return f"{dt.year}/{dt.month}/{dt.day} {dt:%H:%M:%S}"
@@ -366,8 +377,10 @@ class MemeUpdater(Star):
         return (commit_info or "").split()[0][:8] if commit_info else "unknown"
 
     def _get_owner_repo(self, url: str) -> str:
-        repo = url.rstrip("/").removesuffix(".git").split("github.com/")[-1]
-        return repo if "/" in repo else repo.split("/")[-1]
+        path = urlparse(url).path.strip("/")
+        path = path.removesuffix(".git")
+        parts = path.split("/")
+        return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else url)
 
     async def _sync_repo(self, repo: dict, index: int, total: int) -> dict:
         clone_path = repo["clone_dir"]
@@ -398,7 +411,7 @@ class MemeUpdater(Star):
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取当前分支", f"    {branch[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
-            fetch_cmd = ["git", "fetch", "origin", branch]
+            fetch_cmd = ["git", "fetch", "--depth", "1", "origin", branch]
             ret, output = await self._run_repo_cmd(fetch_cmd, cwd=clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} git fetch 失败", f"    {output[:300]}"])
@@ -446,6 +459,11 @@ class MemeUpdater(Star):
             return {"status": "success", "updated": True, "lines": lines}
 
         lines.extend([f"❌ [{index}/{total}] {owner_repo} git clone 失败", f"    {output[:300]}"])
+        if not remote_mode and not os.path.isdir(os.path.join(clone_path, ".git")):
+            try:
+                os.rmdir(clone_path)
+            except OSError:
+                pass
         return {"status": "failed", "updated": False, "lines": lines}
 
     async def _restart_memeapi(self) -> dict:
@@ -520,34 +538,34 @@ class MemeUpdater(Star):
         return len([item for item in os.listdir(path) if not item.startswith(".")])
 
     async def _meme_get_json(self, paths: list[str], session: aiohttp.ClientSession | None = None):
-        last_error = ""
+        errors = []
         timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
+
+        async def request_once(active_session: aiohttp.ClientSession, path: str):
+            async with active_session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
+                text = await resp.text()
+                if resp.status < 400:
+                    return json.loads(text) if text else None
+                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+
         for attempt in range(1, 4):
             if session:
                 for path in paths:
                     try:
-                        async with session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
-                            text = await resp.text()
-                            if resp.status < 400:
-                                return json.loads(text) if text else None
-                            last_error = f"HTTP {resp.status}: {text[:200]}"
+                        return await request_once(session, path)
                     except Exception as e:
-                        last_error = str(e)
+                        errors.append(f"{path}: {e}")
             else:
                 async with aiohttp.ClientSession(timeout=timeout) as new_session:
                     for path in paths:
                         try:
-                            async with new_session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
-                                text = await resp.text()
-                                if resp.status < 400:
-                                    return json.loads(text) if text else None
-                                last_error = f"HTTP {resp.status}: {text[:200]}"
+                            return await request_once(new_session, path)
                         except Exception as e:
-                            last_error = str(e)
+                            errors.append(f"{path}: {e}")
             if attempt < 3:
-                logger.warning(f"meme API 请求失败，准备重试 {attempt}/3：{last_error}")
+                logger.warning(f"meme API 请求失败，准备重试 {attempt}/3：{errors[-1] if errors else '未知错误'}")
                 await asyncio.sleep(attempt * 2)
-        raise RuntimeError(last_error or "meme API 请求失败")
+        raise RuntimeError("; ".join(errors[-6:]) or "meme API 请求失败")
 
     async def _meme_post_image(self, paths: list[str], *, json_body: dict | None = None, form_body: aiohttp.FormData | None = None) -> tuple[bytes, str]:
         last_error = ""
@@ -624,19 +642,28 @@ class MemeUpdater(Star):
 
             timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                results = await asyncio.gather(*(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)))
+                results = await asyncio.gather(*(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)), return_exceptions=True)
 
-            entries = [r for r in results if r is not None]
+            entries = [r for r in results if r is not None and not isinstance(r, Exception)]
             self.meme_infos = dict(entries)
             self._refresh_meme_shortcuts()
             logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
             return len(self.meme_infos)
 
+    def _shortcut_entry(self, key: str, regex: str, args: list, options: dict) -> dict | None:
+        try:
+            return {"key": key, "regex": regex, "compiled_regex": re.compile(f"^{regex}"), "args": args, "options": options}
+        except re.error as e:
+            logger.debug(f"快捷正则编译跳过: {key} - {e}")
+            return None
+
     def _refresh_meme_shortcuts(self):
         shortcuts = []
         for key, info in self.meme_infos.items():
             for keyword in info.get("keywords", []):
-                shortcuts.append({"key": key, "regex": re.escape(str(keyword)), "args": [], "options": {}})
+                entry = self._shortcut_entry(key, re.escape(str(keyword)), [], {})
+                if entry:
+                    shortcuts.append(entry)
             for shortcut in info.get("shortcuts", []):
                 if not isinstance(shortcut, dict):
                     continue
@@ -647,13 +674,15 @@ class MemeUpdater(Star):
                 args = shortcut.get("args") or []
                 options = {}
                 compact_key = shortcut_key.replace(" ", "").replace("#", "")
-                if key == "turn":
+                if key in {"turn", "symmetry"}:
                     options.update(self._direction_options_from_text(key, compact_key))
-                elif key == "symmetry":
-                    options.update(self._direction_options_from_text(key, compact_key))
-                shortcuts.append({"key": key, "regex": regex, "args": args, "options": options})
+                entry = self._shortcut_entry(key, regex, args, options)
+                if entry:
+                    shortcuts.append(entry)
                 if "#" in shortcut_key:
-                    shortcuts.append({"key": key, "regex": regex.replace("#", ""), "args": args, "options": options})
+                    entry = self._shortcut_entry(key, regex.replace("#", ""), args, options)
+                    if entry:
+                        shortcuts.append(entry)
         shortcuts.sort(key=lambda item: len(item["regex"]), reverse=True)
         self.meme_shortcuts = shortcuts
 
@@ -675,8 +704,7 @@ class MemeUpdater(Star):
         return None
 
     def _get_message_args(self, event: AstrMessageEvent, command_name: str) -> str:
-        message = getattr(event, "message_str", "") or ""
-        message = message.strip()
+        message = self._extract_message_text(event)
         if not message:
             return ""
         parts = message.split(maxsplit=1)
@@ -684,28 +712,35 @@ class MemeUpdater(Star):
             return parts[1] if len(parts) > 1 else ""
         return ""
 
+    def _set_direction_option(self, options: dict[str, object], direction: str) -> None:
+        existing = options.get("direction")
+        if existing and existing != direction:
+            raise ArgSyntaxError(f"方向参数冲突：{existing} 与 {direction}")
+        options[direction] = True
+        options["direction"] = direction
+
     def _normalize_meme_options(self, raw_args: str) -> tuple[str, dict[str, object]]:
         options: dict[str, object] = {}
         tokens = []
         for token in split_arg_string(raw_args):
             if token in {"右", "#右"}:
-                options["right"] = True
-                options["direction"] = "right"
+                self._set_direction_option(options, "right")
                 continue
             if token in {"左", "#左"}:
-                options["left"] = True
-                options["direction"] = "left"
+                self._set_direction_option(options, "left")
                 continue
             if token in {"上", "#上"}:
-                options["top"] = True
-                options["direction"] = "top"
+                self._set_direction_option(options, "top")
                 continue
             if token in {"下", "#下"}:
-                options["bottom"] = True
-                options["direction"] = "bottom"
+                self._set_direction_option(options, "bottom")
                 continue
             if token.startswith("#") and len(token) > 1:
-                options[token[1:]] = True
+                if re.fullmatch(r"#[A-Za-z_][\w-]*=.+", token):
+                    name, value = token[1:].split("=", 1)
+                    options[name.replace("-", "_")] = value
+                else:
+                    options[token[1:]] = True
                 continue
             if re.fullmatch(r"[A-Za-z_][\w-]*=.+", token):
                 name, value = token.split("=", 1)
@@ -733,7 +768,9 @@ class MemeUpdater(Star):
         return {}
 
     def _avatar_url(self, user_id: str) -> str:
-        return f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640" if user_id else ""
+        if not user_id:
+            return ""
+        return f"https://q4.qlogo.cn/headimg_dl?dst_uin={quote(str(user_id), safe='')}&spec=640"
 
     def _sender_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
@@ -957,8 +994,9 @@ class MemeUpdater(Star):
                 data = segment.get("data") or {}
                 message_id = str(data.get("id") or data.get("message_id") or data.get("msg_id") or "").strip()
             else:
-                if hasattr(segment, "chain"):
-                    continue
+                chain = getattr(segment, "chain", None)
+                if chain is not None:
+                    return list(chain) if isinstance(chain, list) else []
                 message_id = str(
                     getattr(segment, "id", "")
                     or getattr(segment, "message_id", "")
@@ -1081,16 +1119,35 @@ class MemeUpdater(Star):
         bot_id = bot_id or str(raw.get("self_id") or "").strip()
         return bool(target_id and bot_id and target_id == bot_id)
 
+    @staticmethod
+    def _segment_type_name(segment_type: object) -> str:
+        value = getattr(segment_type, "value", None)
+        if value is not None:
+            return str(value).lower()
+        name = getattr(segment_type, "name", None)
+        if name is not None:
+            return str(name).lower()
+        return str(segment_type or "").lower()
+
+    @staticmethod
+    def _segment_text(segment: object) -> str:
+        if isinstance(segment, dict):
+            seg_type = MemeUpdater._segment_type_name(segment.get("type"))
+            data = segment.get("data") or {}
+            if seg_type in {"text", "plain"} and isinstance(data, dict):
+                return str(data.get("text") or "")
+            return ""
+        seg_type = MemeUpdater._segment_type_name(getattr(segment, "type", "") or getattr(segment, "_type", ""))
+        if seg_type not in {"plain", "text"}:
+            return ""
+        return str(getattr(segment, "text", "") or "")
+
     def _extract_message_text(self, event: AstrMessageEvent) -> str:
-        message_str = str(getattr(event, "message_str", "") or "").strip()
-        if message_str:
-            return message_str
+        text = "".join(self._segment_text(segment) for segment in self._extract_message_segments(event)).strip()
+        if text:
+            return text
         message_obj = getattr(event, "message_obj", None)
-        for value in (
-            getattr(message_obj, "raw_message", None),
-            getattr(message_obj, "message", None),
-            getattr(event, "message", None),
-        ):
+        for value in (getattr(message_obj, "message", None), getattr(event, "message", None)):
             if isinstance(value, str):
                 return value.strip()
         return ""
@@ -1137,7 +1194,7 @@ class MemeUpdater(Star):
                 if qq not in user_ids:
                     user_ids.append(qq)
         sender_id = self._sender_id(event)
-        if sender_id and sender_id not in user_ids and text.startswith("@"):
+        if sender_id and sender_id not in user_ids and text.startswith(("@", "＠")):
             user_ids.insert(0, sender_id)
         return user_ids
 
@@ -1181,7 +1238,18 @@ class MemeUpdater(Star):
         user_infos.extend(avatar_user_infos)
         if image_urls:
             logger.info(f"meme 参数图片来源：{image_urls}，当前发送者={self._sender_id(event)}")
-        images = await asyncio.gather(*(self._download_image(url) for url in image_urls)) if image_urls else []
+        if image_urls:
+            semaphore = asyncio.Semaphore(MAX_IMAGE_DOWNLOAD_CONCURRENCY)
+
+            async def download(url: str):
+                async with semaphore:
+                    return await self._download_image(url)
+
+            download_results = await asyncio.gather(*(download(url) for url in image_urls), return_exceptions=True)
+            images = [result for result in download_results if not isinstance(result, Exception)]
+            user_infos = [info for info, result in zip(user_infos, download_results) if not isinstance(result, Exception)]
+        else:
+            images = []
         return list(images), texts, user_infos
 
     async def _fill_sender_avatar_images(self, event: AstrMessageEvent, images: list[tuple[bytes, str, str]], user_infos: list[dict], target_count: int):
@@ -1302,7 +1370,8 @@ class MemeUpdater(Star):
             with tempfile.NamedTemporaryFile(suffix=ext, dir=temp_dir, delete=False) as tf:
                 tf.write(data)
                 temp_path = tf.name
-            return Comp.Image(file=f"file:///{os.path.abspath(temp_path)}")
+            temp_path = os.path.abspath(temp_path).replace("\\", "/")
+            return Comp.Image(file=f"file:///{temp_path}")
         except Exception as e:
             logger.warning(f"无法创建临时文件发送图片，降级到 base64: {e}")
             b64 = base64.b64encode(data).decode("ascii")
@@ -1360,7 +1429,14 @@ class MemeUpdater(Star):
         started_at = datetime.now()
         repos = self._get_repos()
         total = len(repos)
-        results = await asyncio.gather(*[self._sync_repo(repo, i + 1, total) for i, repo in enumerate(repos)])
+        results = await asyncio.gather(*[self._sync_repo(repo, i + 1, total) for i, repo in enumerate(repos)], return_exceptions=True)
+        normalized_results = []
+        for i, result in enumerate(results, 1):
+            if isinstance(result, Exception):
+                normalized_results.append({"status": "failed", "updated": False, "lines": [f"❌ [{i}/{total}] 更新异常", f"    {result}"]})
+            else:
+                normalized_results.append(result)
+        results = normalized_results
         success = sum(1 for r in results if r["status"] == "success")
         success_updates = [r for r in results if r["status"] == "success" and r["updated"]]
         failed = sum(1 for r in results if r["status"] == "failed")
@@ -1603,13 +1679,7 @@ class MemeUpdater(Star):
         try:
             await self._refresh_meme_infos()
             for shortcut in self.meme_shortcuts:
-                try:
-                    # 预检查正则语法，防止编译错误
-                    regex = re.compile(f"^{shortcut['regex']}")
-                    match = regex.match(content)
-                except Exception as e:
-                    logger.debug(f"快捷正则匹配跳过: {shortcut.get('key')} - {e}")
-                    continue
+                match = shortcut["compiled_regex"].match(content)
                 if not match:
                     continue
                 tail = content[match.end():].strip()
@@ -1629,7 +1699,7 @@ class MemeUpdater(Star):
                 images, texts, user_infos = await self._resolve_generate_args(event, resolved_args)
 
                 # 针对特定表情的参数微调
-                if params["max_images"] == 2 and str(info.get("key")) != "miragetank" and len(images) >= 3:
+                if params["max_images"] == 2 and str(info.get("key")) != MIRAGETANK_KEY and len(images) >= 3:
                     images = [images[0], images[-1]]
                     user_infos = [user_infos[0], user_infos[-1]]
                 elif len(images) > params["max_images"]:
