@@ -137,12 +137,29 @@ class PokeToBotFilter(CustomFilter):
 
 @register("meme_updater", "表情包数据更新与生成插件", "lantao", "1.1.1")
 class MemeUpdater(Star):
+    _global_meme_infos: dict[str, dict] = {}
+    _global_meme_shortcuts: list[dict] = []
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.meme_infos: dict[str, dict] = {}
-        self.meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
+
+    @property
+    def meme_infos(self) -> dict[str, dict]:
+        return MemeUpdater._global_meme_infos
+
+    @meme_infos.setter
+    def meme_infos(self, value: dict[str, dict]):
+        MemeUpdater._global_meme_infos = value
+
+    @property
+    def meme_shortcuts(self) -> list[dict]:
+        return MemeUpdater._global_meme_shortcuts
+
+    @meme_shortcuts.setter
+    def meme_shortcuts(self, value: list[dict]):
+        MemeUpdater._global_meme_shortcuts = value
 
     def _get_repos(self) -> list[dict]:
         repos = self.config.get("repo_list", DEFAULT_REPOS)
@@ -737,12 +754,104 @@ class MemeUpdater(Star):
             bot_id = str(raw_message.get("self_id", "")).strip()
         return self._avatar_url(bot_id)
 
-    def _sender_user_info(self, event: AstrMessageEvent) -> dict:
+    def _group_id(self, event: AstrMessageEvent) -> str:
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = self._raw_event_dict_from_event(event)
+        if isinstance(raw_message, dict):
+            group_id = str(raw_message.get("group_id") or raw_message.get("group") or "").strip()
+            if group_id:
+                return group_id
+        for source in (message_obj, event):
+            group_id = str(getattr(source, "group_id", "") or getattr(source, "group", "") or "").strip()
+            if group_id:
+                return group_id
+        return ""
+
+    async def _lookup_sender_name(self, event: AstrMessageEvent, user_id: str) -> str:
+        bot = getattr(event, "bot", None)
+        if not bot or not user_id:
+            return ""
+        group_id = self._group_id(event)
+        query_user_id = int(user_id) if user_id.isdigit() else user_id
+        query_group_id = int(group_id) if group_id.isdigit() else group_id
+        calls = []
+        if group_id:
+            calls.extend((
+                ("get_group_member_info", {"group_id": query_group_id, "user_id": query_user_id, "no_cache": False}),
+                ("get_group_member", {"group_id": query_group_id, "user_id": query_user_id}),
+            ))
+        calls.extend((
+            ("get_stranger_info", {"user_id": query_user_id, "no_cache": False}),
+            ("get_friend_info", {"user_id": query_user_id}),
+        ))
+
+        for action, params in calls:
+            method = getattr(bot, action, None)
+            if callable(method):
+                try:
+                    info = await method(**params)
+                    name = self._name_from_user_info(info, user_id)
+                    if name:
+                        return name
+                except Exception:
+                    pass
+            call_action = getattr(bot, "call_action", None)
+            if callable(call_action):
+                try:
+                    info = await call_action(action, **params)
+                    name = self._name_from_user_info(info, user_id)
+                    if name:
+                        return name
+                except Exception:
+                    pass
+        return ""
+
+    def _name_from_user_info(self, info: object, user_id: str) -> str:
+        if not isinstance(info, dict):
+            return ""
+        for key in ("card", "nickname", "user_name", "name", "remark"):
+            value = str(info.get(key) or "").strip()
+            if value and value != user_id:
+                return value
+        data = info.get("data")
+        if isinstance(data, dict):
+            return self._name_from_user_info(data, user_id)
+        return ""
+
+    async def _sender_user_info(self, event: AstrMessageEvent) -> dict:
+        names = []
+        message_obj = getattr(event, "message_obj", None)
+        sender = getattr(message_obj, "sender", None)
+        sender_id = self._sender_id(event)
+
+        for source in (sender, message_obj, event):
+            if not source:
+                continue
+            for attr in ("card", "nickname", "user_name", "name", "sender_name"):
+                value = str(getattr(source, attr, "") or "").strip()
+                if value:
+                    names.append(value)
+
+        raw_message = self._raw_event_dict_from_event(event)
+        if isinstance(raw_message, dict):
+            raw_sender = raw_message.get("sender")
+            if isinstance(raw_sender, dict):
+                for key in ("card", "nickname", "user_name", "name"):
+                    value = str(raw_sender.get(key) or "").strip()
+                    if value:
+                        names.append(value)
+
         try:
-            name = event.get_sender_name()
+            value = str(event.get_sender_name() or "").strip()
+            if value:
+                names.append(value)
         except Exception:
-            name = ""
-        return {"name": name or self._sender_id(event), "gender": "unknown"}
+            pass
+
+        name = next((value for value in names if value and value != sender_id), "")
+        if not name:
+            name = await self._lookup_sender_name(event, sender_id)
+        return {"name": name or sender_id, "gender": "unknown"}
 
     def _bot_user_info(self, event: AstrMessageEvent) -> dict:
         message_obj = getattr(event, "message_obj", None)
@@ -1037,7 +1146,7 @@ class MemeUpdater(Star):
                 avatar = self._sender_avatar_url(event)
                 if avatar:
                     avatar_urls.append(avatar)
-                    avatar_user_infos.append(self._sender_user_info(event))
+                    avatar_user_infos.append(await self._sender_user_info(event))
                 continue
             if re.fullmatch(r"https?://\S+", arg):
                 image_urls.append(arg)
@@ -1066,7 +1175,7 @@ class MemeUpdater(Star):
         if not avatar:
             return
         data, content_type, filename = await self._download_image(avatar)
-        user_info = self._sender_user_info(event)
+        user_info = await self._sender_user_info(event)
         while len(images) < target_count:
             images.insert(0, (data, content_type, filename))
             user_infos.insert(0, user_info)
@@ -1080,7 +1189,7 @@ class MemeUpdater(Star):
         if target_count >= 2 and bot_avatar:
             fill_items.append((bot_avatar, self._bot_user_info(event)))
         if sender_avatar:
-            fill_items.append((sender_avatar, self._sender_user_info(event)))
+            fill_items.append((sender_avatar, await self._sender_user_info(event)))
         if not fill_items:
             return
         fill_index = 0
@@ -1424,12 +1533,6 @@ class MemeUpdater(Star):
             yield event.plain_result("没有找到适合当前参数的表情。")
         except Exception as e:
             yield event.plain_result(f"随机表情失败：{e}")
-
-    @command("随机表情")
-    async def meme_random(self, event: AstrMessageEvent):
-        raw_args = self._get_message_args(event, "随机表情")
-        async for result in self._random_meme_results(event, raw_args):
-            yield result
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):
