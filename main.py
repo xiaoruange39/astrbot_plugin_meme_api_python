@@ -493,11 +493,11 @@ class MemeUpdater(Star):
             return 0
         return len([item for item in os.listdir(path) if not item.startswith(".")])
 
-    async def _meme_get_json(self, paths: list[str]):
+    async def _meme_get_json(self, paths: list[str], session: aiohttp.ClientSession | None = None):
         last_error = ""
         timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
         for attempt in range(1, 4):
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            if session:
                 for path in paths:
                     try:
                         async with session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
@@ -507,6 +507,17 @@ class MemeUpdater(Star):
                             last_error = f"HTTP {resp.status}: {text[:200]}"
                     except Exception as e:
                         last_error = str(e)
+            else:
+                async with aiohttp.ClientSession(timeout=timeout) as new_session:
+                    for path in paths:
+                        try:
+                            async with new_session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
+                                text = await resp.text()
+                                if resp.status < 400:
+                                    return json.loads(text) if text else None
+                                last_error = f"HTTP {resp.status}: {text[:200]}"
+                        except Exception as e:
+                            last_error = str(e)
             if attempt < 3:
                 logger.warning(f"meme API 请求失败，准备重试 {attempt}/3：{last_error}")
                 await asyncio.sleep(attempt * 2)
@@ -563,23 +574,33 @@ class MemeUpdater(Star):
             logger.info(f"meme API 返回 {total} 个表情，开始加载详情")
             semaphore = asyncio.Semaphore(self._get_meme_info_concurrency())
 
-            async def load_info(index: int, key: str) -> tuple[str, dict]:
+            async def load_info(session: aiohttp.ClientSession, index: int, key: str) -> tuple[str, dict] | None:
                 async with semaphore:
                     if verbose_log:
                         logger.info(f"[{index}/{total}] 获取表情信息: {key}")
-                    info = await self._meme_get_json([
-                        f"/memes/{quote(key, safe='')}/info",
-                        f"/memes/{quote(key, safe='')}",
-                    ])
-                    if not isinstance(info, dict):
-                        raise RuntimeError(f"{key} 的 info 格式不正确")
-                    info.setdefault("key", key)
-                    info.setdefault("keywords", [key])
-                    info.setdefault("shortcuts", [])
-                    info.setdefault("tags", [])
-                    return key, info
+                    try:
+                        info = await self._meme_get_json([
+                            f"/memes/{quote(key, safe='')}/info",
+                            f"/memes/{quote(key, safe='')}/",
+                            f"/memes/{quote(key, safe='')}",
+                        ], session=session)
+                        if not isinstance(info, dict):
+                            logger.warning(f"{key} 的 info 格式不正确，跳过")
+                            return None
+                        info.setdefault("key", key)
+                        info.setdefault("keywords", [key])
+                        info.setdefault("shortcuts", [])
+                        info.setdefault("tags", [])
+                        return key, info
+                    except Exception as e:
+                        logger.warning(f"获取表情信息失败 {key}: {e}")
+                        return None
 
-            entries = await asyncio.gather(*(load_info(i + 1, str(key)) for i, key in enumerate(keys)))
+            timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                results = await asyncio.gather(*(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)))
+
+            entries = [r for r in results if r is not None]
             self.meme_infos = dict(entries)
             self._refresh_meme_shortcuts()
             logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
@@ -743,15 +764,18 @@ class MemeUpdater(Star):
         return b"".join(chunks)
 
     def _is_forbidden_ip(self, address: str) -> bool:
-        ip = ipaddress.ip_address(address)
-        return any((
-            ip.is_loopback,
-            ip.is_private,
-            ip.is_link_local,
-            ip.is_multicast,
-            ip.is_reserved,
-            ip.is_unspecified,
-        ))
+        try:
+            ip = ipaddress.ip_address(address)
+            return any((
+                ip.is_loopback,
+                ip.is_private,
+                ip.is_link_local,
+                ip.is_multicast,
+                ip.is_reserved,
+                ip.is_unspecified,
+            ))
+        except ValueError:
+            return False
 
     async def _validate_external_image_url(self, url: str) -> None:
         parsed = urlparse(url)
@@ -763,11 +787,9 @@ class MemeUpdater(Star):
         lowered = hostname.rstrip(".").lower()
         if lowered == "localhost" or lowered.endswith(".localhost"):
             raise RuntimeError("不允许访问本机地址")
-        try:
-            if self._is_forbidden_ip(lowered):
-                raise RuntimeError("不允许访问内网或本机地址")
-        except ValueError:
-            pass
+
+        if self._is_forbidden_ip(lowered):
+            raise RuntimeError("不允许访问内网或本机地址")
         try:
             infos = await asyncio.to_thread(socket.getaddrinfo, hostname, parsed.port, type=socket.SOCK_STREAM)
         except socket.gaierror as e:
@@ -1099,6 +1121,7 @@ class MemeUpdater(Star):
         quoted_key = quote(key, safe="")
         return await self._meme_post_image([
             f"/memes/{quoted_key}/render",
+            f"/memes/{quoted_key}/",
             f"/memes/{quoted_key}",
         ], form_body=form)
 
@@ -1417,19 +1440,26 @@ class MemeUpdater(Star):
 
     @filter.event_message_type(EventMessageType.ALL)
     async def meme_shortcut_listener(self, event: AstrMessageEvent):
-        if not self._get_meme_shortcut_enabled():
-            return
         content = self._extract_message_text(event)
         if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
             async for result in self._random_meme_results(event, ""):
                 yield result
             return
+
+        if not self._get_meme_shortcut_enabled():
+            return
+
         if not content or content.startswith(("/", "#", "%", "％")):
             return
         try:
             await self._refresh_meme_infos()
             for shortcut in self.meme_shortcuts:
-                match = re.match(f"^{shortcut['regex']}", content)
+                try:
+                    regex = re.compile(f"^{shortcut['regex']}")
+                    match = regex.match(content)
+                except re.error as e:
+                    logger.warning(f"跳过异常的快捷正则: {shortcut['regex']} - {e}")
+                    continue
                 if not match:
                     continue
                 tail = content[match.end():].strip()
@@ -1468,5 +1498,6 @@ class MemeUpdater(Star):
                 image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
                 yield event.chain_result([self._image_component(image, content_type)])
                 return
-        except Exception:
+        except Exception as e:
+            logger.warning(f"处理表情快捷指令异常: {e}")
             return
