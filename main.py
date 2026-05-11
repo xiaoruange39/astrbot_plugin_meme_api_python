@@ -1087,6 +1087,11 @@ class MemeUpdater(Star):
     def _raw_event_dict(self, event: AstrMessageEvent) -> dict:
         return self._raw_event_dict_from_event(event)
 
+    def _stop_event(self, event: AstrMessageEvent):
+        stop_event = getattr(event, "stop_event", None)
+        if callable(stop_event):
+            stop_event()
+
     def _is_poke_to_bot(self, event: AstrMessageEvent) -> bool:
         return self._is_poke_to_bot_event(event)
 
@@ -1308,12 +1313,14 @@ class MemeUpdater(Star):
 
     @command("重启memeapi")
     async def restart_memeapi(self, event: AstrMessageEvent):
+        self._stop_event(event)
         yield event.plain_result("正在重启 memeapi 服务，请稍候...")
         result = await self._restart_memeapi()
         yield event.plain_result("\n".join(result["lines"]))
 
     @command("更新表情包")
     async def update_memes(self, event: AstrMessageEvent):
+        self._stop_event(event)
         yield event.plain_result("正在更新表情包数据，请稍候...")
 
         os.makedirs(MEME_BASE_DIR, exist_ok=True)
@@ -1375,6 +1382,7 @@ class MemeUpdater(Star):
 
     @command("表情包状态")
     async def meme_status(self, event: AstrMessageEvent):
+        self._stop_event(event)
         lines = ["表情包仓库状态:"]
 
         repos = self._get_repos()
@@ -1406,6 +1414,7 @@ class MemeUpdater(Star):
 
     @command("刷新表情信息")
     async def refresh_meme_infos(self, event: AstrMessageEvent):
+        self._stop_event(event)
         yield event.plain_result("正在刷新 meme API 表情信息...")
         try:
             count = await self._refresh_meme_infos(force=True)
@@ -1415,6 +1424,7 @@ class MemeUpdater(Star):
 
     @command("表情列表")
     async def meme_list(self, event: AstrMessageEvent):
+        self._stop_event(event)
         try:
             await self._refresh_meme_infos()
             image, content_type = await self._render_list()
@@ -1424,6 +1434,7 @@ class MemeUpdater(Star):
 
     @command("表情详情")
     async def meme_info(self, event: AstrMessageEvent):
+        self._stop_event(event)
         query = self._get_message_args(event, "表情详情")
         if not query:
             yield event.plain_result("用法：表情详情 <表情名/关键词>")
@@ -1460,6 +1471,7 @@ class MemeUpdater(Star):
 
     @command("制作表情")
     async def meme_generate(self, event: AstrMessageEvent):
+        self._stop_event(event)
         raw_args = self._get_message_args(event, "制作表情")
         if not raw_args:
             yield event.plain_result("用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]")
@@ -1545,6 +1557,7 @@ class MemeUpdater(Star):
     async def meme_shortcut_listener(self, event: AstrMessageEvent):
         content = self._extract_message_text(event)
         if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
+            self._stop_event(event)
             async for result in self._random_meme_results(event, ""):
                 yield result
             return
@@ -1599,6 +1612,7 @@ class MemeUpdater(Star):
                 if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
                     return
                 image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
+                self._stop_event(event)
                 yield event.chain_result([self._image_component(image, content_type)])
                 return
         except Exception as e:
