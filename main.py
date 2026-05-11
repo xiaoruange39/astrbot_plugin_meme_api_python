@@ -1287,8 +1287,8 @@ class MemeUpdater(Star):
     def _select_render_images(self, images: list[tuple[bytes, str, str]], user_infos: list[dict], max_images: int) -> tuple[list[tuple[bytes, str, str]], list[dict]]:
         if max_images <= 0 or len(images) <= max_images:
             return images, user_infos
-        selected_images = images[-max_images:]
-        selected_user_infos = user_infos[-max_images:]
+        selected_images = images[:max_images]
+        selected_user_infos = user_infos[:max_images]
         return selected_images, selected_user_infos
 
     def _params_type(self, info: dict) -> dict:
@@ -1700,8 +1700,8 @@ class MemeUpdater(Star):
 
                 # 针对特定表情的参数微调
                 if params["max_images"] == 2 and str(info.get("key")) != MIRAGETANK_KEY and len(images) >= 3:
-                    images = [images[0], images[-1]]
-                    user_infos = [user_infos[0], user_infos[-1]]
+                    images = [images[0], images[1]]
+                    user_infos = [user_infos[0], user_infos[1]]
                 elif len(images) > params["max_images"]:
                     images, user_infos = self._select_render_images(images, user_infos, params["max_images"])
 
