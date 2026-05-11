@@ -11,6 +11,7 @@ import tempfile
 import time
 import ipaddress
 import mimetypes
+import platform
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
@@ -141,6 +142,7 @@ class MemeUpdater(Star):
         self._meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
         self._meme_data_dir = os.path.join(StarTools.get_data_dir(), "memeapi")
+        self._shortcut_refresh_task: asyncio.Task | None = None
 
     @property
     def meme_infos(self) -> dict[str, dict]:
@@ -181,10 +183,12 @@ class MemeUpdater(Star):
             if not isinstance(repo, dict):
                 continue
             url = str(repo.get("url", "")).strip()
-            data_dir = str(repo.get("data_dir", "")).strip()
-            if not url or not data_dir:
+            data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
+            if not url or not data_subdir or os.path.isabs(data_subdir) or ".." in data_subdir.replace("\\", "/").split("/"):
                 continue
-            clone_dir = os.path.dirname(data_dir.rstrip("/"))
+            clone_dir = os.path.join(self._meme_data_dir, data_subdir)
+            data_leaf = str(repo.get("data_leaf", "")).strip()
+            data_dir = os.path.join(clone_dir, data_leaf) if data_leaf else clone_dir
             name = os.path.basename(clone_dir) or url.rstrip("/").split("/")[-1].removesuffix(".git")
             result.append({
                 "name": name,
@@ -292,29 +296,30 @@ class MemeUpdater(Star):
         }
         return cmd, env
 
-    def _ssh_base_cmd(self) -> str:
+    def _ssh_base_args(self) -> list[str]:
         host = self._get_remote_host()
         user = self._get_remote_user()
         port = self._get_remote_port()
         mode = self._get_remote_auth_mode()
         key_path = self._get_remote_key_path()
         destination = f"{user}@{host}" if user else host
-        parts = ["ssh", "-p", str(port)]
+        args = ["ssh", "-p", str(port)]
         if mode == "私钥登录" and key_path:
-            parts.extend(["-i", key_path])
+            args.extend(["-i", key_path])
         if mode == "密码登录":
-            parts.extend(["-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"])
-        parts.append(destination)
-        return " ".join(shlex.quote(part) for part in parts)
+            args.extend(["-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"])
+        args.append(destination)
+        return args
 
     def _shell_join(self, args: list[str]) -> str:
         return " ".join(shlex.quote(str(arg)) for arg in args)
 
     async def _run_remote_cmd(self, cmd: str) -> tuple[int, str]:
+        if self._get_remote_auth_mode() == "密码登录" and platform.system() == "Windows":
+            return -1, "Windows 环境不支持 SSH_ASKPASS 密码登录，请改用私钥登录"
         remote_cmd, env = self._build_remote_cmd(cmd)
-        ssh_cmd = f"{self._ssh_base_cmd()} {shlex.quote(remote_cmd)}"
         try:
-            return await self._run_shell_cmd(ssh_cmd, env=env)
+            return await self._run_cmd([*self._ssh_base_args(), remote_cmd], env=env)
         finally:
             if "SSH_ASKPASS" in env:
                 try:
@@ -542,7 +547,7 @@ class MemeUpdater(Star):
         timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
 
         async def request_once(active_session: aiohttp.ClientSession, path: str):
-            async with active_session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
+            async with active_session.get(f"{self._get_meme_api_base_url()}{path}", timeout=timeout) as resp:
                 text = await resp.text()
                 if resp.status < 400:
                     return json.loads(text) if text else None
@@ -651,6 +656,9 @@ class MemeUpdater(Star):
             return len(self.meme_infos)
 
     def _shortcut_entry(self, key: str, regex: str, args: list, options: dict) -> dict | None:
+        if len(regex) > 120:
+            logger.debug(f"快捷正则过长，已跳过: {key}")
+            return None
         try:
             return {"key": key, "regex": regex, "compiled_regex": re.compile(f"^{regex}"), "args": args, "options": options}
         except re.error as e:
@@ -844,14 +852,14 @@ class MemeUpdater(Star):
         if callable(method):
             try:
                 results.append(await method(**params))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"调用 {action} 失败: {e}")
         call_action = getattr(bot, "call_action", None)
         if callable(call_action):
             try:
                 results.append(await call_action(action, **params))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"调用 {action} 失败: {e}")
         return results
 
     def _name_from_user_info(self, info: object, user_id: str) -> str:
@@ -956,6 +964,21 @@ class MemeUpdater(Star):
             if self._is_forbidden_ip(address):
                 raise RuntimeError("不允许访问解析到内网或本机的地址")
 
+    def _validate_image_bytes(self, data: bytes, content_type: str) -> None:
+        signatures = {
+            "image/png": (b"\x89PNG\r\n\x1a\n",),
+            "image/jpeg": (b"\xff\xd8\xff",),
+            "image/gif": (b"GIF87a", b"GIF89a"),
+            "image/webp": (b"RIFF",),
+        }
+        prefixes = signatures.get(content_type)
+        if not prefixes:
+            return
+        if not any(data.startswith(prefix) for prefix in prefixes):
+            raise RuntimeError("下载内容与图片类型不匹配")
+        if content_type == "image/webp" and data[8:12] != b"WEBP":
+            raise RuntimeError("下载内容与图片类型不匹配")
+
     async def _request_external_image(self, session: aiohttp.ClientSession, url: str) -> tuple[bytes, str]:
         current_url = url
         for _ in range(5):
@@ -973,6 +996,7 @@ class MemeUpdater(Star):
                 content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
                 if not content_type.startswith("image/"):
                     raise RuntimeError(f"下载内容不是图片：{content_type}")
+                self._validate_image_bytes(data, content_type)
                 return data, content_type
         raise RuntimeError("图片下载重定向次数过多")
 
@@ -1226,14 +1250,15 @@ class MemeUpdater(Star):
                 user_infos.append({})
                 continue
             if arg.startswith("@") and arg[1:].isdigit():
-                avatar_urls.append(self._avatar_url(arg[1:]))
-                avatar_user_infos.append({"name": arg[1:], "gender": "unknown"})
+                user_id = arg[1:]
+                avatar_urls.append(self._avatar_url(user_id))
+                avatar_user_infos.append({"name": await self._lookup_sender_name(event, user_id) or user_id, "gender": "unknown"})
                 continue
             texts.append(arg)
         at_ids = self._extract_message_at_ids(event)
         for user_id in at_ids:
             avatar_urls.append(self._avatar_url(user_id))
-            avatar_user_infos.append({"name": user_id, "gender": "unknown"})
+            avatar_user_infos.append({"name": await self._lookup_sender_name(event, user_id) or user_id, "gender": "unknown"})
         explicit_image_count = len(image_urls)
         image_urls.extend(avatar_urls)
         user_infos.extend(avatar_user_infos)
@@ -1576,8 +1601,8 @@ class MemeUpdater(Star):
                 key = quote(str(info.get("key")), safe="")
                 image, content_type = await self._meme_get_image([f"/memes/{key}/preview", f"/memes/{key}/preview/"])
                 yield event.chain_result([self._image_component(image, content_type)])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"获取表情预览失败 {info.get('key')}: {e}")
         except Exception as e:
             yield event.plain_result(f"获取表情详情失败：{e}")
 
@@ -1652,7 +1677,8 @@ class MemeUpdater(Star):
                         self._image_component(image, content_type),
                     ])
                     return
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"随机表情渲染跳过 {info.get('key')}: {e}")
                     continue
             yield event.plain_result("没有找到适合当前参数的表情。")
         except Exception as e:
@@ -1680,8 +1706,9 @@ class MemeUpdater(Star):
 
         if not content or content.startswith(("/", "#", "%", "％")):
             return
-        try:
+        if not self.meme_infos:
             await self._refresh_meme_infos()
+        try:
             for shortcut in self.meme_shortcuts:
                 match = shortcut["compiled_regex"].match(content)
                 if not match:
@@ -1696,13 +1723,11 @@ class MemeUpdater(Star):
                 options = {**shortcut.get("options", {}), **options}
                 content_options = self._direction_options_from_text(str(info.get("key")), content)
                 if content_options:
-                    # 如果内容中自带方向，覆盖快捷指令中的方向
                     for d in ["left", "right", "top", "bottom", "direction"]:
                         options.pop(d, None)
                     options.update(content_options)
                 images, texts, user_infos = await self._resolve_generate_args(event, resolved_args)
 
-                # 针对特定表情的参数微调
                 if params["max_images"] == 2 and str(info.get("key")) != MIRAGETANK_KEY and len(images) >= 3:
                     images = [images[0], images[1]]
                     user_infos = [user_infos[0], user_infos[1]]
