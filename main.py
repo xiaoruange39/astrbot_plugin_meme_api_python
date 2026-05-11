@@ -1234,6 +1234,7 @@ class MemeUpdater(Star):
         for user_id in at_ids:
             avatar_urls.append(self._avatar_url(user_id))
             avatar_user_infos.append({"name": user_id, "gender": "unknown"})
+        explicit_image_count = len(image_urls)
         image_urls.extend(avatar_urls)
         user_infos.extend(avatar_user_infos)
         if image_urls:
@@ -1246,6 +1247,9 @@ class MemeUpdater(Star):
                     return await self._download_image(url)
 
             download_results = await asyncio.gather(*(download(url) for url in image_urls), return_exceptions=True)
+            explicit_failures = [result for result in download_results[:explicit_image_count] if isinstance(result, Exception)]
+            if explicit_failures:
+                raise RuntimeError(f"引用/输入图片下载失败：{explicit_failures[0]}")
             images = [result for result in download_results if not isinstance(result, Exception)]
             user_infos = [info for info, result in zip(user_infos, download_results) if not isinstance(result, Exception)]
         else:
