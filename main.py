@@ -24,7 +24,6 @@ from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 import astrbot.api.message_components as Comp
 
-# 基础配置常量
 SCREEN_SESSION = "meme-generator"
 TEMP_IMAGE_TTL_SECONDS = 3600
 COMMAND_TIMEOUT_SECONDS = 120
@@ -85,6 +84,10 @@ def _format_keywords(keywords: list[str]) -> str:
     return "、".join(f"“{keyword}”" for keyword in keywords)
 
 
+def _has_shell_control_chars(value: str) -> bool:
+    return any(ord(char) < 32 or char in ";&|`$<>\n\r" for char in value)
+
+
 class ArgSyntaxError(SyntaxError):
     pass
 
@@ -121,6 +124,8 @@ def split_arg_string(arg_string: str) -> list[str]:
         else:
             current.append(char)
 
+    if escape_next:
+        raise ArgSyntaxError("参数转义符不能位于末尾")
     if current:
         args.append("".join(current))
     if in_quote:
@@ -141,8 +146,7 @@ class MemeUpdater(Star):
         self._meme_infos: dict[str, dict] = {}
         self._meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
-        self._meme_data_dir = os.path.join(StarTools.get_data_dir(), "memeapi")
-        self._shortcut_refresh_task: asyncio.Task | None = None
+        self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
 
     @property
     def meme_infos(self) -> dict[str, dict]:
@@ -184,7 +188,7 @@ class MemeUpdater(Star):
                 continue
             url = str(repo.get("url", "")).strip()
             data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
-            if not url or not data_subdir or os.path.isabs(data_subdir) or ".." in data_subdir.replace("\\", "/").split("/"):
+            if not url or _has_shell_control_chars(url) or not data_subdir or _has_shell_control_chars(data_subdir) or os.path.isabs(data_subdir) or ".." in data_subdir.replace("\\", "/").split("/"):
                 continue
             clone_dir = os.path.join(self._meme_data_dir, data_subdir)
             data_leaf = str(repo.get("data_leaf", "")).strip()
@@ -224,10 +228,12 @@ class MemeUpdater(Star):
         return str(self.config.get("remote_key_path", "")).strip()
 
     def _get_remote_workdir(self) -> str:
-        return str(self.config.get("remote_workdir", self._meme_data_dir)).strip() or self._meme_data_dir
+        workdir = str(self.config.get("remote_workdir", self._meme_data_dir)).strip() or self._meme_data_dir
+        return self._meme_data_dir if _has_shell_control_chars(workdir) else workdir
 
     def _get_docker_container(self) -> str:
-        return str(self.config.get("docker_container", SCREEN_SESSION)).strip() or SCREEN_SESSION
+        container = str(self.config.get("docker_container", SCREEN_SESSION)).strip() or SCREEN_SESSION
+        return SCREEN_SESSION if _has_shell_control_chars(container) else container
 
     def _get_meme_api_base_url(self) -> str:
         return str(self.config.get("meme_api_base_url", "http://127.0.0.1:2233")).strip().rstrip("/")
@@ -250,6 +256,12 @@ class MemeUpdater(Star):
             return max(1, int(self.config.get("meme_info_concurrency", 8)))
         except (TypeError, ValueError):
             return 8
+
+    def _get_repo_update_concurrency(self) -> int:
+        try:
+            return max(1, int(self.config.get("repo_update_concurrency", 2)))
+        except (TypeError, ValueError):
+            return 2
 
     def _get_meme_shortcut_enabled(self) -> bool:
         return bool(self.config.get("meme_shortcut_enabled", True))
@@ -572,15 +584,15 @@ class MemeUpdater(Star):
                 await asyncio.sleep(attempt * 2)
         raise RuntimeError("; ".join(errors[-6:]) or "meme API 请求失败")
 
-    async def _meme_post_image(self, paths: list[str], *, json_body: dict | None = None, form_body: aiohttp.FormData | None = None) -> tuple[bytes, str]:
+    async def _meme_post_image(self, paths: list[str], *, json_body: dict | None = None, form_factory=None) -> tuple[bytes, str]:
         last_error = ""
         timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for path in paths:
                 try:
                     kwargs = {}
-                    if form_body is not None:
-                        kwargs["data"] = form_body
+                    if form_factory is not None:
+                        kwargs["data"] = form_factory()
                     else:
                         kwargs["json"] = json_body or {}
                     async with session.post(f"{self._get_meme_api_base_url()}{path}", **kwargs) as resp:
@@ -1184,6 +1196,10 @@ class MemeUpdater(Star):
         if callable(stop_event):
             stop_event()
 
+    async def _yield_and_stop(self, event: AstrMessageEvent, result):
+        self._stop_event(event)
+        yield result
+
     def _is_poke_to_bot(self, event: AstrMessageEvent) -> bool:
         return self._is_poke_to_bot_event(event)
 
@@ -1320,33 +1336,43 @@ class MemeUpdater(Star):
         selected_user_infos = user_infos[:max_images]
         return selected_images, selected_user_infos
 
+    def _safe_int(self, value: object, default: int = 0) -> int:
+        try:
+            if value is None or value == "":
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _params_type(self, info: dict) -> dict:
         params = info.get("params_type") or {}
         return {
-            "min_images": int(params.get("min_images", 0)),
-            "max_images": int(params.get("max_images", 0)),
-            "min_texts": int(params.get("min_texts", 0)),
-            "max_texts": int(params.get("max_texts", 0)),
+            "min_images": self._safe_int(params.get("min_images")),
+            "max_images": self._safe_int(params.get("max_images")),
+            "min_texts": self._safe_int(params.get("min_texts")),
+            "max_texts": self._safe_int(params.get("max_texts")),
             "default_texts": list(params.get("default_texts") or []),
         }
 
     async def _render_meme(self, key: str, images: list[tuple[bytes, str, str]], texts: list[str], user_infos: list[dict], options: dict[str, object] | None = None) -> tuple[bytes, str]:
-        form = aiohttp.FormData()
-        for data, content_type, filename in images:
-            form.add_field("images", data, filename=filename, content_type=content_type)
-        for text in texts:
-            # 确保 text 为字符串
-            form.add_field("texts", str(text))
-        render_args = {"user_infos": user_infos}
-        if options:
-            render_args.update(options)
-        form.add_field("args", json.dumps(render_args, ensure_ascii=False))
+        def make_form() -> aiohttp.FormData:
+            form = aiohttp.FormData()
+            for data, content_type, filename in images:
+                form.add_field("images", data, filename=filename, content_type=content_type)
+            for text in texts:
+                form.add_field("texts", str(text))
+            render_args = {"user_infos": user_infos}
+            if options:
+                render_args.update(options)
+            form.add_field("args", json.dumps(render_args, ensure_ascii=False))
+            return form
+
         quoted_key = quote(str(key), safe="")
         return await self._meme_post_image([
             f"/memes/{quoted_key}/render",
             f"/memes/{quoted_key}/",
             f"/memes/{quoted_key}",
-        ], form_body=form)
+        ], form_factory=make_form)
 
     def _parse_meme_time(self, value: object) -> float:
         if not value:
@@ -1458,7 +1484,13 @@ class MemeUpdater(Star):
         started_at = datetime.now()
         repos = self._get_repos()
         total = len(repos)
-        results = await asyncio.gather(*[self._sync_repo(repo, i + 1, total) for i, repo in enumerate(repos)], return_exceptions=True)
+        semaphore = asyncio.Semaphore(self._get_repo_update_concurrency())
+
+        async def sync_limited(repo: dict, index: int):
+            async with semaphore:
+                return await self._sync_repo(repo, index, total)
+
+        results = await asyncio.gather(*[sync_limited(repo, i + 1) for i, repo in enumerate(repos)], return_exceptions=True)
         normalized_results = []
         for i, result in enumerate(results, 1):
             if isinstance(result, Exception):
@@ -1561,13 +1593,14 @@ class MemeUpdater(Star):
 
     @filter.command("表情列表")
     async def meme_list(self, event: AstrMessageEvent):
-        self._stop_event(event)
         try:
             await self._refresh_meme_infos()
             image, content_type = await self._render_list()
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             yield event.plain_result(f"获取表情列表失败：{e}")
+        finally:
+            self._stop_event(event)
 
     @filter.command("表情详情")
     async def meme_info(self, event: AstrMessageEvent):
@@ -1641,7 +1674,8 @@ class MemeUpdater(Star):
                 yield event.plain_result(f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。")
                 return
             image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
-            yield event.chain_result([self._image_component(image, content_type)])
+            async for result in self._yield_and_stop(event, event.chain_result([self._image_component(image, content_type)])):
+                yield result
         except ArgSyntaxError as e:
             yield event.plain_result(str(e))
         except Exception as e:
@@ -1672,10 +1706,11 @@ class MemeUpdater(Star):
                     render_texts = [str(v) for v in params["default_texts"]] if auto_use else texts
                     image, content_type = await self._render_meme(str(info.get("key")), render_images, render_texts, render_user_infos, options)
                     keywords = _format_keywords([str(v) for v in info.get("keywords", [])])
-                    yield event.chain_result([
+                    async for result in self._yield_and_stop(event, event.chain_result([
                         Comp.Plain(f"关键词：{keywords}\n"),
                         self._image_component(image, content_type),
-                    ])
+                    ])):
+                        yield result
                     return
                 except Exception as e:
                     logger.debug(f"随机表情渲染跳过 {info.get('key')}: {e}")
@@ -1694,11 +1729,10 @@ class MemeUpdater(Star):
     @filter.event_message_type(EventMessageType.ALL)
     async def meme_shortcut_listener(self, event: AstrMessageEvent):
         content = self._extract_message_text(event)
-        # 显式的随机指令即使关闭快捷匹配也应生效
         if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
-            self._stop_event(event)
             async for result in self._random_meme_results(event, ""):
                 yield result
+            self._stop_event(event)
             return
 
         if not self._get_meme_shortcut_enabled():
@@ -1749,8 +1783,8 @@ class MemeUpdater(Star):
                     continue
 
                 image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
-                self._stop_event(event)
                 yield event.chain_result([self._image_component(image, content_type)])
+                self._stop_event(event)
                 return
         except Exception as e:
             logger.warning(f"处理表情快捷指令异常: {e}")
