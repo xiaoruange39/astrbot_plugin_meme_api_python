@@ -8,6 +8,7 @@ import random
 import socket
 import asyncio
 import tempfile
+import time
 import ipaddress
 import mimetypes
 from datetime import datetime
@@ -15,52 +16,47 @@ from urllib.parse import quote, urlparse
 
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import command, EventMessageType
+from astrbot.api.event.filter import EventMessageType
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 import astrbot.api.message_components as Comp
 
-MEME_BASE_DIR = "/root/memeapi"
-SCREEN_SESSION = "memeapi"
+# 基础配置常量
+SCREEN_SESSION = "meme-generator"
+TEMP_IMAGE_TTL_SECONDS = 3600
 
-DEFAULT_REPOS = [
+DEFAULT_REPO_SPECS = [
     {
         "name": "meme_emoji",
         "url": "https://github.com/anyliew/meme_emoji",
-        "clone_dir": "/root/memeapi/meme_emoji",
-        "data_dir": "/root/memeapi/meme_emoji/emoji",
+        "data_subdir": os.path.join("meme_emoji", "emoji"),
     },
     {
         "name": "meme-generator-jj",
         "url": "https://github.com/jinjiao007/meme-generator-jj",
-        "clone_dir": "/root/memeapi/meme-generator-jj",
-        "data_dir": "/root/memeapi/meme-generator-jj/memes",
+        "data_subdir": os.path.join("meme-generator-jj", "memes"),
     },
     {
         "name": "meme_emoji_nsfw",
         "url": "https://github.com/anyliew/meme_emoji_nsfw",
-        "clone_dir": "/root/memeapi/meme_emoji_nsfw",
-        "data_dir": "/root/memeapi/meme_emoji_nsfw/emoji",
+        "data_subdir": os.path.join("meme_emoji_nsfw", "emoji"),
     },
     {
         "name": "tudou-meme",
         "url": "https://github.com/LRZ9712/tudou-meme",
-        "clone_dir": "/root/memeapi/tudou-meme",
-        "data_dir": "/root/memeapi/tudou-meme/meme",
+        "data_subdir": os.path.join("tudou-meme", "meme"),
     },
     {
         "name": "xiaoruan-meme",
         "url": "https://github.com/xiaoruange39/xiaoruan-meme",
-        "clone_dir": "/root/memeapi/xiaoruan-meme",
-        "data_dir": "/root/memeapi/xiaoruan-meme/emoji",
+        "data_subdir": os.path.join("xiaoruan-meme", "emoji"),
     },
     {
         "name": "meme-generator-contrib",
         "url": "https://github.com/MemeCrafters/meme-generator-contrib",
-        "clone_dir": "/root/memeapi/meme-generator-contrib",
-        "data_dir": "/root/memeapi/meme-generator-contrib/memes",
+        "data_subdir": os.path.join("meme-generator-contrib", "memes"),
     },
 ]
 
@@ -137,34 +133,47 @@ class PokeToBotFilter(CustomFilter):
 
 @register("meme_updater", "表情包数据更新与生成插件", "lantao", "1.1.1")
 class MemeUpdater(Star):
-    _global_meme_infos: dict[str, dict] = {}
-    _global_meme_shortcuts: list[dict] = []
-
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        self._meme_infos: dict[str, dict] = {}
+        self._meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
+        self._meme_data_dir = os.path.join(StarTools.get_data_dir(), "memeapi")
 
     @property
     def meme_infos(self) -> dict[str, dict]:
-        return MemeUpdater._global_meme_infos
+        return self._meme_infos
 
     @meme_infos.setter
     def meme_infos(self, value: dict[str, dict]):
-        MemeUpdater._global_meme_infos = value
+        self._meme_infos = value
 
     @property
     def meme_shortcuts(self) -> list[dict]:
-        return MemeUpdater._global_meme_shortcuts
+        return self._meme_shortcuts
 
     @meme_shortcuts.setter
     def meme_shortcuts(self, value: list[dict]):
-        MemeUpdater._global_meme_shortcuts = value
+        self._meme_shortcuts = value
+
+    def _default_repos(self) -> list[dict]:
+        repos = []
+        for spec in DEFAULT_REPO_SPECS:
+            data_dir = os.path.join(self._meme_data_dir, spec["data_subdir"])
+            repos.append({
+                "name": spec["name"],
+                "url": spec["url"],
+                "clone_dir": os.path.dirname(data_dir),
+                "data_dir": data_dir,
+            })
+        return repos
 
     def _get_repos(self) -> list[dict]:
-        repos = self.config.get("repo_list", DEFAULT_REPOS)
+        default_repos = self._default_repos()
+        repos = self.config.get("repo_list", default_repos)
         if not isinstance(repos, list):
-            return DEFAULT_REPOS
+            return default_repos
 
         result = []
         for repo in repos:
@@ -210,7 +219,7 @@ class MemeUpdater(Star):
         return str(self.config.get("remote_key_path", "")).strip()
 
     def _get_remote_workdir(self) -> str:
-        return str(self.config.get("remote_workdir", MEME_BASE_DIR)).strip() or MEME_BASE_DIR
+        return str(self.config.get("remote_workdir", self._meme_data_dir)).strip() or self._meme_data_dir
 
     def _get_docker_container(self) -> str:
         return str(self.config.get("docker_container", SCREEN_SESSION)).strip() or SCREEN_SESSION
@@ -673,7 +682,7 @@ class MemeUpdater(Star):
         parts = message.split(maxsplit=1)
         if parts and parts[0].lstrip("#/％%") == command_name:
             return parts[1] if len(parts) > 1 else ""
-        return parts[1] if len(parts) > 1 else ""
+        return ""
 
     def _normalize_meme_options(self, raw_args: str) -> tuple[str, dict[str, object]]:
         options: dict[str, object] = {}
@@ -786,25 +795,27 @@ class MemeUpdater(Star):
         ))
 
         for action, params in calls:
-            method = getattr(bot, action, None)
-            if callable(method):
-                try:
-                    info = await method(**params)
-                    name = self._name_from_user_info(info, user_id)
-                    if name:
-                        return name
-                except Exception:
-                    pass
-            call_action = getattr(bot, "call_action", None)
-            if callable(call_action):
-                try:
-                    info = await call_action(action, **params)
-                    name = self._name_from_user_info(info, user_id)
-                    if name:
-                        return name
-                except Exception:
-                    pass
+            for info in await self._call_bot_action_candidates(bot, action, params):
+                name = self._name_from_user_info(info, user_id)
+                if name:
+                    return name
         return ""
+
+    async def _call_bot_action_candidates(self, bot: object, action: str, params: dict) -> list[object]:
+        results = []
+        method = getattr(bot, action, None)
+        if callable(method):
+            try:
+                results.append(await method(**params))
+            except Exception:
+                pass
+        call_action = getattr(bot, "call_action", None)
+        if callable(call_action):
+            try:
+                results.append(await call_action(action, **params))
+            except Exception:
+                pass
+        return results
 
     def _name_from_user_info(self, info: object, user_id: str) -> str:
         if not isinstance(info, dict):
@@ -1227,12 +1238,13 @@ class MemeUpdater(Star):
         for data, content_type, filename in images:
             form.add_field("images", data, filename=filename, content_type=content_type)
         for text in texts:
-            form.add_field("texts", text)
+            # 确保 text 为字符串
+            form.add_field("texts", str(text))
         render_args = {"user_infos": user_infos}
         if options:
             render_args.update(options)
         form.add_field("args", json.dumps(render_args, ensure_ascii=False))
-        quoted_key = quote(key, safe="")
+        quoted_key = quote(str(key), safe="")
         return await self._meme_post_image([
             f"/memes/{quoted_key}/render",
             f"/memes/{quoted_key}/",
@@ -1283,8 +1295,28 @@ class MemeUpdater(Star):
 
     def _image_component(self, data: bytes, content_type: str) -> Comp.Image:
         ext = mimetypes.guess_extension(content_type) or ".png"
-        b64 = base64.b64encode(data).decode("ascii")
-        return Comp.Image(file=f"base64://{b64}")
+        try:
+            temp_dir = os.path.join(self._meme_data_dir, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            self._cleanup_temp_images(temp_dir)
+            with tempfile.NamedTemporaryFile(suffix=ext, dir=temp_dir, delete=False) as tf:
+                tf.write(data)
+                temp_path = tf.name
+            return Comp.Image(file=f"file:///{os.path.abspath(temp_path)}")
+        except Exception as e:
+            logger.warning(f"无法创建临时文件发送图片，降级到 base64: {e}")
+            b64 = base64.b64encode(data).decode("ascii")
+            return Comp.Image(file=f"base64://{b64}")
+
+    def _cleanup_temp_images(self, temp_dir: str) -> None:
+        expires_before = time.time() - TEMP_IMAGE_TTL_SECONDS
+        for name in os.listdir(temp_dir):
+            path = os.path.join(temp_dir, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < expires_before:
+                    os.remove(path)
+            except OSError:
+                pass
 
     def _shortcut_args(self, template_args: list, match: re.Match) -> str:
         resolved = []
@@ -1311,19 +1343,19 @@ class MemeUpdater(Star):
             return "", {"left": True}
         return raw_args, {}
 
-    @command("重启memeapi")
+    @filter.command("重启memeapi")
     async def restart_memeapi(self, event: AstrMessageEvent):
         self._stop_event(event)
         yield event.plain_result("正在重启 memeapi 服务，请稍候...")
         result = await self._restart_memeapi()
         yield event.plain_result("\n".join(result["lines"]))
 
-    @command("更新表情包")
+    @filter.command("更新表情包")
     async def update_memes(self, event: AstrMessageEvent):
         self._stop_event(event)
         yield event.plain_result("正在更新表情包数据，请稍候...")
 
-        os.makedirs(MEME_BASE_DIR, exist_ok=True)
+        os.makedirs(self._meme_data_dir, exist_ok=True)
 
         started_at = datetime.now()
         repos = self._get_repos()
@@ -1380,7 +1412,7 @@ class MemeUpdater(Star):
 
         yield event.plain_result("\n".join(summary_lines))
 
-    @command("表情包状态")
+    @filter.command("表情包状态")
     async def meme_status(self, event: AstrMessageEvent):
         self._stop_event(event)
         lines = ["表情包仓库状态:"]
@@ -1412,7 +1444,7 @@ class MemeUpdater(Star):
 
         yield event.plain_result("\n".join(lines))
 
-    @command("刷新表情信息")
+    @filter.command("刷新表情信息")
     async def refresh_meme_infos(self, event: AstrMessageEvent):
         self._stop_event(event)
         yield event.plain_result("正在刷新 meme API 表情信息...")
@@ -1422,7 +1454,7 @@ class MemeUpdater(Star):
         except Exception as e:
             yield event.plain_result(f"刷新失败：{e}")
 
-    @command("表情列表")
+    @filter.command("表情列表")
     async def meme_list(self, event: AstrMessageEvent):
         self._stop_event(event)
         try:
@@ -1432,7 +1464,7 @@ class MemeUpdater(Star):
         except Exception as e:
             yield event.plain_result(f"获取表情列表失败：{e}")
 
-    @command("表情详情")
+    @filter.command("表情详情")
     async def meme_info(self, event: AstrMessageEvent):
         self._stop_event(event)
         query = self._get_message_args(event, "表情详情")
@@ -1469,7 +1501,7 @@ class MemeUpdater(Star):
         except Exception as e:
             yield event.plain_result(f"获取表情详情失败：{e}")
 
-    @command("制作表情")
+    @filter.command("制作表情")
     async def meme_generate(self, event: AstrMessageEvent):
         self._stop_event(event)
         raw_args = self._get_message_args(event, "制作表情")
@@ -1481,7 +1513,7 @@ class MemeUpdater(Star):
             if not parts:
                 yield event.plain_result("用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]")
                 return
-            query, rest = parts[0], " ".join(shlex.quote(v) if " " in v else v for v in parts[1:])
+            query, rest = parts[0], " ".join(parts[1:])
             await self._refresh_meme_infos()
             info = self._find_meme(query)
             if not info:
@@ -1556,6 +1588,7 @@ class MemeUpdater(Star):
     @filter.event_message_type(EventMessageType.ALL)
     async def meme_shortcut_listener(self, event: AstrMessageEvent):
         content = self._extract_message_text(event)
+        # 显式的随机指令即使关闭快捷匹配也应生效
         if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
             self._stop_event(event)
             async for result in self._random_meme_results(event, ""):
@@ -1571,10 +1604,11 @@ class MemeUpdater(Star):
             await self._refresh_meme_infos()
             for shortcut in self.meme_shortcuts:
                 try:
+                    # 预检查正则语法，防止编译错误
                     regex = re.compile(f"^{shortcut['regex']}")
                     match = regex.match(content)
-                except re.error as e:
-                    logger.warning(f"跳过异常的快捷正则: {shortcut['regex']} - {e}")
+                except Exception as e:
+                    logger.debug(f"快捷正则匹配跳过: {shortcut.get('key')} - {e}")
                     continue
                 if not match:
                     continue
@@ -1582,35 +1616,39 @@ class MemeUpdater(Star):
                 resolved_args = " ".join(value for value in [self._shortcut_args(shortcut["args"], match), tail] if value).strip()
                 info = self.meme_infos.get(shortcut["key"])
                 if not info:
-                    return
+                    continue
                 params = self._params_type(info)
                 resolved_args, options = self._normalize_meme_options(resolved_args)
                 options = {**shortcut.get("options", {}), **options}
                 content_options = self._direction_options_from_text(str(info.get("key")), content)
                 if content_options:
-                    options.pop("left", None)
-                    options.pop("right", None)
-                    options.pop("top", None)
-                    options.pop("bottom", None)
-                    options.pop("direction", None)
+                    # 如果内容中自带方向，覆盖快捷指令中的方向
+                    for d in ["left", "right", "top", "bottom", "direction"]:
+                        options.pop(d, None)
                     options.update(content_options)
                 images, texts, user_infos = await self._resolve_generate_args(event, resolved_args)
+
+                # 针对特定表情的参数微调
                 if params["max_images"] == 2 and str(info.get("key")) != "miragetank" and len(images) >= 3:
                     images = [images[0], images[-1]]
                     user_infos = [user_infos[0], user_infos[-1]]
                 elif len(images) > params["max_images"]:
                     images, user_infos = self._select_render_images(images, user_infos, params["max_images"])
+
                 if self._get_meme_auto_sender_avatar() and len(images) < params["min_images"]:
                     if images:
                         await self._fill_sender_avatar_images(event, images, user_infos, params["min_images"])
                     else:
                         await self._fill_default_avatar_images(event, images, user_infos, params["min_images"])
+
                 if self._get_meme_auto_default_texts() and not texts:
                     texts.extend(str(v) for v in params["default_texts"])
+
                 if not (params["min_images"] <= len(images) <= params["max_images"]):
-                    return
+                    continue
                 if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
-                    return
+                    continue
+
                 image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
                 self._stop_event(event)
                 yield event.chain_result([self._image_component(image, content_type)])
