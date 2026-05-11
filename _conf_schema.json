@@ -134,7 +134,7 @@
     "default": "meme-generator"
   },
   "remote_enabled": {
-    "description": "启用远程服务器（实验性）",
+    "description": "启用远程服务器（实验性，谨慎使用！！）",
     "hint": "开启后，更新和重启命令会通过 SSH 在远程服务器执行。",
     "type": "bool",
     "default": false
