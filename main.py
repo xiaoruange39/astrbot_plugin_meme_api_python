@@ -5,11 +5,13 @@ import json
 import shlex
 import base64
 import random
+import socket
 import asyncio
 import tempfile
+import ipaddress
 import mimetypes
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
@@ -205,6 +207,13 @@ class MemeUpdater(Star):
         except (TypeError, ValueError):
             return 30
 
+    def _get_max_image_bytes(self) -> int:
+        try:
+            mb = int(self.config.get("meme_max_image_mb", 10))
+            return max(1, mb) * 1024 * 1024
+        except (TypeError, ValueError):
+            return 10 * 1024 * 1024
+
     def _get_meme_info_concurrency(self) -> int:
         try:
             return max(1, int(self.config.get("meme_info_concurrency", 8)))
@@ -271,25 +280,46 @@ class MemeUpdater(Star):
         parts.append(destination)
         return " ".join(shlex.quote(part) for part in parts)
 
+    def _shell_join(self, args: list[str]) -> str:
+        return " ".join(shlex.quote(str(arg)) for arg in args)
+
     async def _run_remote_cmd(self, cmd: str) -> tuple[int, str]:
         remote_cmd, env = self._build_remote_cmd(cmd)
         ssh_cmd = f"{self._ssh_base_cmd()} {shlex.quote(remote_cmd)}"
-        ret, output = await self._run_cmd(ssh_cmd, env=env)
-        if "SSH_ASKPASS" in env:
-            try:
-                os.unlink(env["SSH_ASKPASS"])
-            except OSError:
-                pass
-        return ret, output
+        try:
+            return await self._run_shell_cmd(ssh_cmd, env=env)
+        finally:
+            if "SSH_ASKPASS" in env:
+                try:
+                    os.unlink(env["SSH_ASKPASS"])
+                except OSError:
+                    pass
 
-    async def _run_repo_cmd(self, cmd: str, cwd: str = None, remote: bool = False) -> tuple[int, str]:
+    async def _run_repo_cmd(self, cmd: list[str] | str, cwd: str = None, remote: bool = False) -> tuple[int, str]:
         if remote:
+            remote_cmd = self._shell_join(cmd) if isinstance(cmd, list) else cmd
             if cwd:
-                cmd = f"cd {shlex.quote(cwd)} && {cmd}"
-            return await self._run_remote_cmd(cmd)
-        return await self._run_cmd(cmd, cwd=cwd)
+                remote_cmd = f"cd {shlex.quote(cwd)} && {remote_cmd}"
+            return await self._run_remote_cmd(remote_cmd)
+        if isinstance(cmd, list):
+            return await self._run_cmd(cmd, cwd=cwd)
+        return await self._run_shell_cmd(cmd, cwd=cwd)
 
-    async def _run_cmd(self, cmd: str, cwd: str = None, env: dict | None = None) -> tuple[int, str]:
+    async def _run_cmd(self, cmd: list[str], cwd: str = None, env: dict | None = None) -> tuple[int, str]:
+        run_env = os.environ.copy()
+        if env:
+            run_env.update(env)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+            env=run_env,
+        )
+        stdout, _ = await proc.communicate()
+        return proc.returncode, stdout.decode("utf-8", errors="replace").strip()
+
+    async def _run_shell_cmd(self, cmd: str, cwd: str = None, env: dict | None = None) -> tuple[int, str]:
         run_env = os.environ.copy()
         if env:
             run_env.update(env)
@@ -336,24 +366,24 @@ class MemeUpdater(Star):
             ret = 0 if os.path.isdir(os.path.join(clone_path, ".git")) else 1
 
         if ret == 0:
-            branch_cmd = "git rev-parse --abbrev-ref HEAD"
+            branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
             ret, branch = await self._run_repo_cmd(branch_cmd, cwd=clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取当前分支", f"    {branch[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
-            fetch_cmd = f"git fetch origin {branch}"
+            fetch_cmd = ["git", "fetch", "origin", branch]
             ret, output = await self._run_repo_cmd(fetch_cmd, cwd=clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} git fetch 失败", f"    {output[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
-            ret, local_commit = await self._run_repo_cmd("git rev-parse HEAD", cwd=clone_path, remote=remote_mode)
+            ret, local_commit = await self._run_repo_cmd(["git", "rev-parse", "HEAD"], cwd=clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取本地版本", f"    {local_commit[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
-            ret, remote_commit = await self._run_repo_cmd(f"git rev-parse origin/{branch}", cwd=clone_path, remote=remote_mode)
+            ret, remote_commit = await self._run_repo_cmd(["git", "rev-parse", f"origin/{branch}"], cwd=clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取远端版本", f"    {remote_commit[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
@@ -365,7 +395,7 @@ class MemeUpdater(Star):
                 lines.append(f"✅ [{index}/{total}] {owner_repo} 无更新 ({local_short})")
                 return {"status": "success", "updated": False, "lines": lines}
 
-            reset_cmd = f"git reset --hard origin/{branch}"
+            reset_cmd = ["git", "reset", "--hard", f"origin/{branch}"]
             ret, output = await self._run_repo_cmd(reset_cmd, cwd=clone_path, remote=remote_mode)
             if ret == 0:
                 after_count = self._count_data_items(repo["data_dir"])
@@ -379,7 +409,7 @@ class MemeUpdater(Star):
             lines.extend([f"❌ [{index}/{total}] {owner_repo} git reset 失败", f"    {output[:300]}"])
             return {"status": "failed", "updated": False, "lines": lines}
 
-        clone_cmd = f"git clone --depth 1 {repo['url']} {clone_path}"
+        clone_cmd = ["git", "clone", "--depth", "1", repo["url"], clone_path]
         ret, output = await self._run_repo_cmd(clone_cmd, cwd=workdir, remote=remote_mode)
         if ret == 0:
             after_count = self._count_data_items(repo["data_dir"])
@@ -400,7 +430,7 @@ class MemeUpdater(Star):
         if remote_mode:
             workdir = _normalize_remote_path(self._get_remote_workdir())
             ret, output = await self._run_repo_cmd(
-                f"docker inspect {shlex.quote(container)}",
+                ["docker", "inspect", container],
                 cwd=workdir,
                 remote=True,
             )
@@ -412,7 +442,7 @@ class MemeUpdater(Star):
                 ])
                 return {"success": False, "lines": lines}
 
-            ret, output = await self._run_repo_cmd(f"docker restart {shlex.quote(container)}", cwd=workdir, remote=True)
+            ret, output = await self._run_repo_cmd(["docker", "restart", container], cwd=workdir, remote=True)
             if ret != 0:
                 lines.extend(["❌ 重启容器失败", f"    {output[:300]}"])
                 return {"success": False, "lines": lines}
@@ -420,7 +450,7 @@ class MemeUpdater(Star):
             lines.append("⏳ 等待容器状态稳定...")
             await asyncio.sleep(2)
             ret, output = await self._run_repo_cmd(
-                f"docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(container)}",
+                ["docker", "inspect", "-f", "{{.State.Running}}", container],
                 cwd=workdir,
                 remote=True,
             )
@@ -431,7 +461,7 @@ class MemeUpdater(Star):
             lines.extend(["❌ 容器未处于运行状态", f"    {output[:300]}"])
             return {"success": False, "lines": lines}
 
-        ret, output = await self._run_cmd(f"docker inspect {shlex.quote(container)}")
+        ret, output = await self._run_cmd(["docker", "inspect", container])
         if ret != 0:
             lines.extend([
                 f"⚠️ 未找到本机容器 {container}",
@@ -440,7 +470,7 @@ class MemeUpdater(Star):
             ])
             return {"success": False, "lines": lines}
 
-        ret, output = await self._run_cmd(f"docker restart {shlex.quote(container)}")
+        ret, output = await self._run_cmd(["docker", "restart", container])
         if ret != 0:
             lines.extend(["❌ 重启容器失败", f"    {output[:300]}"])
             return {"success": False, "lines": lines}
@@ -449,7 +479,7 @@ class MemeUpdater(Star):
         await asyncio.sleep(2)
 
         ret, output = await self._run_cmd(
-            f"docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(container)}"
+            ["docker", "inspect", "-f", "{{.State.Running}}", container]
         )
         if ret == 0 and output.strip().lower() == "true":
             lines.extend(["✅ 容器重启成功", f"🎉 {container} 已运行"])
@@ -494,7 +524,7 @@ class MemeUpdater(Star):
                     else:
                         kwargs["json"] = json_body or {}
                     async with session.post(f"{self._get_meme_api_base_url()}{path}", **kwargs) as resp:
-                        data = await resp.read()
+                        data = await self._read_limited_response(resp)
                         content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
                         if resp.status < 400:
                             return data, content_type
@@ -510,7 +540,7 @@ class MemeUpdater(Star):
             for path in paths:
                 try:
                     async with session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
-                        data = await resp.read()
+                        data = await self._read_limited_response(resp)
                         content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
                         if resp.status < 400:
                             return data, content_type
@@ -656,7 +686,7 @@ class MemeUpdater(Star):
         return {}
 
     def _avatar_url(self, user_id: str) -> str:
-        return f"http://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640" if user_id else ""
+        return f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640" if user_id else ""
 
     def _sender_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
@@ -701,14 +731,76 @@ class MemeUpdater(Star):
             bot_id = str(raw_message.get("self_id", "")).strip()
         return {"name": bot_id or "机器人", "gender": "unknown"}
 
-    async def _download_image(self, url: str) -> tuple[bytes, str, str]:
-        timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                data = await resp.read()
+    async def _read_limited_response(self, resp: aiohttp.ClientResponse, limit: int | None = None) -> bytes:
+        max_bytes = limit or self._get_max_image_bytes()
+        chunks = []
+        total = 0
+        async for chunk in resp.content.iter_chunked(64 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise RuntimeError(f"响应内容超过大小限制：{max_bytes} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _is_forbidden_ip(self, address: str) -> bool:
+        ip = ipaddress.ip_address(address)
+        return any((
+            ip.is_loopback,
+            ip.is_private,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        ))
+
+    async def _validate_external_image_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise RuntimeError("图片 URL 只支持 http/https")
+        hostname = parsed.hostname
+        if not hostname:
+            raise RuntimeError("图片 URL 缺少主机名")
+        lowered = hostname.rstrip(".").lower()
+        if lowered == "localhost" or lowered.endswith(".localhost"):
+            raise RuntimeError("不允许访问本机地址")
+        try:
+            if self._is_forbidden_ip(lowered):
+                raise RuntimeError("不允许访问内网或本机地址")
+        except ValueError:
+            pass
+        try:
+            infos = await asyncio.to_thread(socket.getaddrinfo, hostname, parsed.port, type=socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise RuntimeError(f"图片 URL 域名解析失败：{e}") from e
+        for info in infos:
+            address = info[4][0]
+            if self._is_forbidden_ip(address):
+                raise RuntimeError("不允许访问解析到内网或本机的地址")
+
+    async def _request_external_image(self, session: aiohttp.ClientSession, url: str) -> tuple[bytes, str]:
+        current_url = url
+        for _ in range(5):
+            await self._validate_external_image_url(current_url)
+            async with session.get(current_url, allow_redirects=False) as resp:
+                if 300 <= resp.status < 400:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise RuntimeError("图片下载重定向缺少 Location")
+                    current_url = str(resp.url.join(location))
+                    continue
+                data = await self._read_limited_response(resp)
                 if resp.status >= 400:
                     raise RuntimeError(f"下载图片失败：HTTP {resp.status}")
                 content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
+                if not content_type.startswith("image/"):
+                    raise RuntimeError(f"下载内容不是图片：{content_type}")
+                return data, content_type
+        raise RuntimeError("图片下载重定向次数过多")
+
+    async def _download_image(self, url: str) -> tuple[bytes, str, str]:
+        timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            data, content_type = await self._request_external_image(session, url)
         ext = mimetypes.guess_extension(content_type) or ".png"
         return data, content_type, f"image{ext}"
 
@@ -1164,7 +1256,7 @@ class MemeUpdater(Star):
                 continue
 
             ret, commit_info = await self._run_cmd(
-                'git log -1 --format="%h %s (%cr)"', cwd=clone_path
+                ["git", "log", "-1", "--format=%h %s (%cr)"], cwd=clone_path
             )
             if ret == 0:
                 count = self._count_data_items(data_path)

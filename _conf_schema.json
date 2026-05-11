@@ -11,6 +11,12 @@
     "type": "int",
     "default": 30
   },
+  "meme_max_image_mb": {
+    "description": "最大图片下载限制 (MB)",
+    "hint": "防止恶意 URL 下载超大文件导致内存泄漏，默认 10MB。",
+    "type": "int",
+    "default": 10
+  },
   "meme_info_concurrency": {
     "description": "表情信息加载并发数",
     "hint": "启动或刷新表情信息时并发请求详情的数量。",
