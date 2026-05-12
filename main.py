@@ -1458,7 +1458,9 @@ class MemeUpdater(Star):
             download_results = await asyncio.gather(*(download(url) for url in image_urls), return_exceptions=True)
             explicit_failures = [result for result in download_results[:explicit_image_count] if isinstance(result, Exception)]
             if explicit_failures:
-                raise RuntimeError(f"引用/输入图片下载失败：{explicit_failures[0]}")
+                failure = explicit_failures[0]
+                message = str(failure) or type(failure).__name__
+                raise RuntimeError(f"引用/输入图片下载失败：{message}")
             images = [result for result in download_results if not isinstance(result, Exception)]
             user_infos = [info for info, result in zip(user_infos, download_results) if not isinstance(result, Exception)]
         else:
