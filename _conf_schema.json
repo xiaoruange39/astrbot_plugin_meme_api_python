@@ -35,6 +35,18 @@
     "type": "list",
     "default": []
   },
+  "meme_search_limit": {
+    "description": "表情搜索结果数量",
+    "hint": "控制 meme搜索 指令最多返回多少条结果。",
+    "type": "int",
+    "default": 30
+  },
+  "meme_search_forward_enabled": {
+    "description": "搜索结果使用合并消息",
+    "hint": "开启后 meme搜索 会优先用合并转发发送结果；不支持时自动回退为普通文本。",
+    "type": "bool",
+    "default": true
+  },
   "meme_shortcut_enabled": {
     "description": "启用表情快捷指令",
     "hint": "开启后会尝试匹配 meme API 返回的关键词和快捷正则。",

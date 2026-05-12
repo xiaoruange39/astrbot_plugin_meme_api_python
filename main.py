@@ -342,6 +342,15 @@ class MemeUpdater(Star):
             return True
         return any(str(keyword).strip() in disabled_names for keyword in info.get("keywords", []))
 
+    def _get_meme_search_limit(self) -> int:
+        try:
+            return max(1, int(self.config.get("meme_search_limit", 30)))
+        except (TypeError, ValueError):
+            return 30
+
+    def _get_meme_search_forward_enabled(self) -> bool:
+        return bool(self.config.get("meme_search_forward_enabled", True))
+
     def _get_meme_list_text_template(self) -> str:
         return str(self.config.get("meme_list_text_template", "{index}. {keywords}")).strip() or "{index}. {keywords}"
 
@@ -884,6 +893,39 @@ class MemeUpdater(Star):
                     return info
         return None
 
+    def _meme_search_text(self, info: dict) -> str:
+        values = [str(info.get("key", ""))]
+        for field in ("keywords", "tags"):
+            values.extend(str(value) for value in info.get(field, []))
+        for shortcut in info.get("shortcuts", []):
+            if isinstance(shortcut, dict):
+                values.append(str(shortcut.get("humanized") or shortcut.get("key") or ""))
+        return " ".join(values).lower()
+
+    def _search_memes(self, query: str, limit: int | None = None) -> list[dict]:
+        limit = limit or self._get_meme_search_limit()
+        lowered = query.strip().lower()
+        if not lowered:
+            return []
+        exact_matches = []
+        fuzzy_matches = []
+        for info in self._sorted_meme_infos():
+            key = str(info.get("key", ""))
+            keywords = [str(value) for value in info.get("keywords", [])]
+            candidates = [key, *keywords]
+            if any(value.lower() == lowered for value in candidates):
+                exact_matches.append(info)
+            elif lowered in self._meme_search_text(info):
+                fuzzy_matches.append(info)
+        return [*exact_matches, *fuzzy_matches][:limit]
+
+    def _meme_display_name(self, info: dict) -> str:
+        keywords = [str(value) for value in info.get("keywords", []) if str(value).strip()]
+        return keywords[0] if keywords else str(info.get("key", ""))
+
+    def _format_meme_search_result(self, index: int, info: dict) -> str:
+        return f"{index}. {self._meme_display_name(info)}"
+
     def _get_message_args(self, event: AstrMessageEvent, command_name: str) -> str:
         message = self._extract_message_text(event)
         if not message:
@@ -894,11 +936,21 @@ class MemeUpdater(Star):
         return ""
 
     def _set_direction_option(self, options: dict[str, object], direction: str) -> None:
-        existing = options.get("direction")
+        existing = options.get("__direction")
         if existing and existing != direction:
             raise ArgSyntaxError(f"方向参数冲突：{existing} 与 {direction}")
-        options[direction] = True
-        options["direction"] = direction
+        options["__direction"] = direction
+
+    def _direction_options_for_key(self, direction: str) -> dict[str, object]:
+        return {"direction": direction}
+
+    def _materialize_direction_options(self, options: dict[str, object]) -> dict[str, object]:
+        direction = options.get("__direction")
+        if not direction:
+            return options
+        resolved = {name: value for name, value in options.items() if name not in {"__direction", "left", "right", "top", "bottom", "direction"}}
+        resolved.update(self._direction_options_for_key(str(direction)))
+        return resolved
 
     def _normalize_meme_options(self, raw_args: str) -> tuple[str, dict[str, object]]:
         options: dict[str, object] = {}
@@ -934,18 +986,18 @@ class MemeUpdater(Star):
         compact = text.replace(" ", "").replace("#", "")
         if key == "turn":
             if compact.startswith("转右"):
-                return {"right": True}
+                return self._direction_options_for_key("right")
             if compact.startswith("转左"):
-                return {"left": True}
+                return self._direction_options_for_key("left")
         if key == "symmetry":
             if compact.startswith("对称右"):
-                return {"direction": "right"}
+                return self._direction_options_for_key("right")
             if compact.startswith("对称左"):
-                return {"direction": "left"}
+                return self._direction_options_for_key("left")
             if compact.startswith("对称上"):
-                return {"direction": "top"}
+                return self._direction_options_for_key("top")
             if compact.startswith("对称下"):
-                return {"direction": "bottom"}
+                return self._direction_options_for_key("bottom")
         return {}
 
     def _avatar_url(self, user_id: str) -> str:
@@ -1036,6 +1088,41 @@ class MemeUpdater(Star):
             except Exception as e:
                 logger.debug(f"调用 {action} 失败: {e}")
         return results
+
+    async def _try_send_forward_message(self, event: AstrMessageEvent, title: str, content: str, count: int) -> bool:
+        bot = getattr(event, "bot", None)
+        if not bot or not content:
+            return False
+        group_id = self._group_id(event)
+        user_id = self._sender_id(event)
+        bot_id = self._bot_id(event) or "0"
+        nodes = [{"type": "node", "data": {"name": title, "uin": bot_id, "content": content}}]
+        metadata = {"prompt": "表情搜索结果", "summary": f"查看 {count} 条搜索结果", "source": "meme搜索"}
+        if group_id:
+            target = int(group_id) if group_id.isdigit() else group_id
+            calls = [("send_group_forward_msg", {"group_id": target, "messages": nodes, **metadata})]
+        elif user_id:
+            target = int(user_id) if user_id.isdigit() else user_id
+            calls = [("send_private_forward_msg", {"user_id": target, "messages": nodes, **metadata})]
+        else:
+            return False
+        for action, params in calls:
+            call_action = getattr(bot, "call_action", None)
+            if callable(call_action):
+                try:
+                    await call_action(action, **params)
+                    return True
+                except Exception as e:
+                    logger.debug(f"调用 {action} 失败: {e}")
+                    continue
+            method = getattr(bot, action, None)
+            if callable(method):
+                try:
+                    await method(**params)
+                    return True
+                except Exception as e:
+                    logger.debug(f"调用 {action} 失败: {e}")
+        return False
 
     def _name_from_user_info(self, info: object, user_id: str) -> str:
         if not isinstance(info, dict):
@@ -1659,9 +1746,9 @@ class MemeUpdater(Star):
             return raw_args, {}
         compact = raw_args.replace(" ", "")
         if compact in {"右", "#右"}:
-            return "", {"right": True}
+            return "", self._direction_options_for_key("right")
         if compact in {"左", "#左"}:
-            return "", {"left": True}
+            return "", self._direction_options_for_key("left")
         return raw_args, {}
 
     @filter.command("重启memeapi")
@@ -1812,6 +1899,27 @@ class MemeUpdater(Star):
         except Exception as e:
             yield event.plain_result(f"刷新失败：{e}")
 
+    @filter.command("meme搜索")
+    async def meme_search(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        query = self._get_message_args(event, "meme搜索")
+        if not query:
+            yield event.plain_result("用法：meme搜索 <关键词>")
+            return
+        try:
+            await self._refresh_meme_infos()
+            matches = self._search_memes(query)
+            if not matches:
+                yield event.plain_result(f"未找到相关表情：{query}")
+                return
+            title = f"搜索结果（查看 {len(matches)} 条搜索结果）"
+            result_text = "\n".join([title, *[self._format_meme_search_result(index, info) for index, info in enumerate(matches, 1)]])
+            if self._get_meme_search_forward_enabled() and await self._try_send_forward_message(event, title, result_text, len(matches)):
+                return
+            yield event.plain_result(result_text)
+        except Exception as e:
+            yield event.plain_result(f"搜索表情失败：{e}")
+
     @filter.command("表情列表")
     async def meme_list(self, event: AstrMessageEvent):
         try:
@@ -1906,6 +2014,7 @@ class MemeUpdater(Star):
         try:
             await self._refresh_meme_infos()
             raw_args, options = self._normalize_meme_options(raw_args)
+            options = self._materialize_direction_options(options)
             if resolve_args:
                 images, texts, user_infos = await self._resolve_generate_args(event, raw_args)
             else:
@@ -1963,7 +2072,7 @@ class MemeUpdater(Star):
             return
         if not self.meme_infos:
             if not await self._wait_meme_info_refresh_for_shortcut():
-                yield event.plain_result("表情信息正在初始化，请稍后再试一次。")
+                logger.info("表情信息正在初始化，请稍后再试一次。")
                 self._stop_event(event)
                 return
         if not self.meme_shortcuts:
@@ -1979,13 +2088,15 @@ class MemeUpdater(Star):
                 if not info:
                     continue
                 params = self._params_type(info)
+                key = str(info.get("key"))
                 resolved_args, options = self._normalize_meme_options(resolved_args)
                 options = {**shortcut.get("options", {}), **options}
-                content_options = self._direction_options_from_text(str(info.get("key")), content)
+                content_options = self._direction_options_from_text(key, content)
                 if content_options:
-                    for d in ["left", "right", "top", "bottom", "direction"]:
+                    for d in ["left", "right", "top", "bottom", "direction", "__direction"]:
                         options.pop(d, None)
                     options.update(content_options)
+                options = self._materialize_direction_options(options)
                 images, texts, user_infos = await self._resolve_generate_args(event, resolved_args)
 
                 if params["max_images"] == 2 and str(info.get("key")) != MIRAGETANK_KEY and len(images) >= 3:
@@ -2008,7 +2119,7 @@ class MemeUpdater(Star):
                 if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
                     continue
 
-                image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
+                image, content_type = await self._render_meme(key, images, texts, user_infos, options)
                 yield event.chain_result([self._image_component(image, content_type)])
                 self._stop_event(event)
                 return
