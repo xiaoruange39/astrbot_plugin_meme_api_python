@@ -1,6 +1,5 @@
 import os
 import re
-import io
 import json
 import shlex
 import base64
@@ -12,6 +11,7 @@ import time
 import ipaddress
 import mimetypes
 import platform
+import posixpath
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
@@ -30,38 +30,39 @@ TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS = 300
 COMMAND_TIMEOUT_SECONDS = 120
 MAX_IMAGE_DOWNLOAD_CONCURRENCY = 4
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+SHORTCUT_INITIALIZE_WAIT_SECONDS = 10
 MIRAGETANK_KEY = "miragetank"
 
 DEFAULT_REPO_SPECS = [
     {
         "name": "meme_emoji",
         "url": "https://github.com/anyliew/meme_emoji",
-        "data_subdir": os.path.join("meme_emoji", "emoji"),
+        "data_subdir": "meme_emoji/emoji",
     },
     {
         "name": "meme-generator-jj",
         "url": "https://github.com/jinjiao007/meme-generator-jj",
-        "data_subdir": os.path.join("meme-generator-jj", "memes"),
+        "data_subdir": "meme-generator-jj/memes",
     },
     {
         "name": "meme_emoji_nsfw",
         "url": "https://github.com/anyliew/meme_emoji_nsfw",
-        "data_subdir": os.path.join("meme_emoji_nsfw", "emoji"),
+        "data_subdir": "meme_emoji_nsfw/emoji",
     },
     {
         "name": "tudou-meme",
         "url": "https://github.com/LRZ9712/tudou-meme",
-        "data_subdir": os.path.join("tudou-meme", "meme"),
+        "data_subdir": "tudou-meme/meme",
     },
     {
         "name": "xiaoruan-meme",
         "url": "https://github.com/xiaoruange39/xiaoruan-meme",
-        "data_subdir": os.path.join("xiaoruan-meme", "emoji"),
+        "data_subdir": "xiaoruan-meme/emoji",
     },
     {
         "name": "meme-generator-contrib",
         "url": "https://github.com/MemeCrafters/meme-generator-contrib",
-        "data_subdir": os.path.join("meme-generator-contrib", "memes"),
+        "data_subdir": "meme-generator-contrib/memes",
     },
 ]
 
@@ -97,6 +98,20 @@ def _is_safe_relative_path(path: str) -> bool:
 
 def _is_safe_ssh_arg(value: str) -> bool:
     return bool(value) and not value.startswith("-") and not _has_shell_control_chars(value)
+
+
+def _posix_join(base: str, *parts: str) -> str:
+    path = base
+    for part in parts:
+        normalized = str(part).replace("\\", "/").strip("/")
+        if normalized:
+            path = posixpath.join(path, normalized)
+    return path
+
+
+def _is_allowed_repo_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 class ArgSyntaxError(SyntaxError):
@@ -157,6 +172,7 @@ class MemeUpdater(Star):
         self._meme_infos: dict[str, dict] = {}
         self._meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
+        self._meme_info_refresh_task: asyncio.Task | None = None
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
         self._last_temp_cleanup = 0.0
 
@@ -179,10 +195,13 @@ class MemeUpdater(Star):
     def _default_repos(self) -> list[dict]:
         repos = []
         for spec in DEFAULT_REPO_SPECS:
-            data_dir = os.path.join(self._meme_data_dir, spec["data_subdir"])
+            data_subdir = spec["data_subdir"]
+            data_dir = os.path.join(self._meme_data_dir, data_subdir)
             repos.append({
                 "name": spec["name"],
                 "url": spec["url"],
+                "data_subdir": data_subdir,
+                "data_leaf": "",
                 "clone_dir": os.path.dirname(data_dir),
                 "data_dir": data_dir,
             })
@@ -200,7 +219,7 @@ class MemeUpdater(Star):
                 continue
             url = str(repo.get("url", "")).strip()
             data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
-            if not url or _has_shell_control_chars(url) or not _is_safe_relative_path(data_subdir):
+            if not url or _has_shell_control_chars(url) or not _is_allowed_repo_url(url) or not _is_safe_relative_path(data_subdir):
                 continue
             clone_dir = os.path.join(self._meme_data_dir, data_subdir)
             data_leaf = str(repo.get("data_leaf", "")).strip()
@@ -211,10 +230,20 @@ class MemeUpdater(Star):
             result.append({
                 "name": name,
                 "url": url,
+                "data_subdir": data_subdir,
+                "data_leaf": data_leaf,
                 "clone_dir": clone_dir,
                 "data_dir": data_dir,
             })
         return result or default_repos
+
+    def _remote_repo_paths(self, repo: dict) -> tuple[str, str]:
+        remote_workdir = _normalize_remote_path(self._get_remote_workdir())
+        data_subdir = str(repo.get("data_subdir") or "").strip()
+        data_leaf = str(repo.get("data_leaf") or "").strip()
+        remote_clone_dir = _posix_join(remote_workdir, data_subdir)
+        remote_data_dir = _posix_join(remote_clone_dir, data_leaf) if data_leaf else remote_clone_dir
+        return remote_clone_dir, remote_data_dir
 
     def _get_remote_enabled(self) -> bool:
         return bool(self.config.get("remote_enabled", False))
@@ -440,7 +469,8 @@ class MemeUpdater(Star):
 
     async def _sync_repo(self, repo: dict, index: int, total: int) -> dict:
         clone_path = repo["clone_dir"]
-        before_count = self._count_data_items(repo["data_dir"])
+        data_path = repo["data_dir"]
+        before_count = 0
         owner_repo = repo.get("owner_repo") or self._get_owner_repo(repo["url"])
         remote_mode = self._get_remote_enabled()
         workdir = self._get_remote_workdir() if remote_mode else None
@@ -448,37 +478,43 @@ class MemeUpdater(Star):
         lines = [f"📦 [{index}/{total}] 正在更新 {owner_repo}..."]
 
         if remote_mode:
-            remote_base = _normalize_remote_path(workdir)
-            remote_clone = _normalize_remote_path(clone_path)
-            mkdir_cmd = f"mkdir -p {shlex.quote(remote_base)}"
+            remote_clone, remote_data = self._remote_repo_paths(repo)
+            remote_clone_parent = posixpath.dirname(remote_clone)
+            mkdir_cmd = f"mkdir -p {shlex.quote(remote_clone_parent)}"
             ret, output = await self._run_remote_cmd(mkdir_cmd)
             if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法创建远程工作目录", f"    {output[:300]}"])
+                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法创建远程仓库目录", f"    {output[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
             exists_cmd = f"test -d {shlex.quote(remote_clone + '/.git')}"
-            ret, _ = await self._run_repo_cmd(exists_cmd, remote=True, cwd=remote_base)
+            ret, _ = await self._run_repo_cmd(exists_cmd, remote=True, cwd=remote_clone_parent)
+            repo_clone_path = remote_clone
+            repo_data_path = remote_data
+            before_count = await self._count_remote_data_items(repo_data_path)
         else:
             ret = 0 if os.path.isdir(os.path.join(clone_path, ".git")) else 1
+            repo_clone_path = clone_path
+            repo_data_path = data_path
+            before_count = self._count_data_items(repo_data_path)
 
         if ret == 0:
             branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
-            ret, branch = await self._run_repo_cmd(branch_cmd, cwd=clone_path, remote=remote_mode)
+            ret, branch = await self._run_repo_cmd(branch_cmd, cwd=repo_clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取当前分支", f"    {branch[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
             fetch_cmd = ["git", "fetch", "--depth", "1", "origin", branch]
-            ret, output = await self._run_repo_cmd(fetch_cmd, cwd=clone_path, remote=remote_mode)
+            ret, output = await self._run_repo_cmd(fetch_cmd, cwd=repo_clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} git fetch 失败", f"    {output[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
-            ret, local_commit = await self._run_repo_cmd(["git", "rev-parse", "HEAD"], cwd=clone_path, remote=remote_mode)
+            ret, local_commit = await self._run_repo_cmd(["git", "rev-parse", "HEAD"], cwd=repo_clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取本地版本", f"    {local_commit[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
 
-            ret, remote_commit = await self._run_repo_cmd(["git", "rev-parse", f"origin/{branch}"], cwd=clone_path, remote=remote_mode)
+            ret, remote_commit = await self._run_repo_cmd(["git", "rev-parse", f"origin/{branch}"], cwd=repo_clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取远端版本", f"    {remote_commit[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
@@ -491,7 +527,7 @@ class MemeUpdater(Star):
                 return {"status": "success", "updated": False, "lines": lines}
 
             status_cmd = ["git", "status", "--porcelain"]
-            ret, status_output = await self._run_repo_cmd(status_cmd, cwd=clone_path, remote=remote_mode)
+            ret, status_output = await self._run_repo_cmd(status_cmd, cwd=repo_clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法检查本地修改", f"    {status_output[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
@@ -500,26 +536,26 @@ class MemeUpdater(Star):
                 return {"status": "failed", "updated": False, "lines": lines}
 
             reset_cmd = ["git", "reset", "--hard", f"origin/{branch}"]
-            ret, output = await self._run_repo_cmd(reset_cmd, cwd=clone_path, remote=remote_mode)
+            ret, output = await self._run_repo_cmd(reset_cmd, cwd=repo_clone_path, remote=remote_mode)
             if ret == 0:
-                after_count = self._count_data_items(repo["data_dir"])
+                after_count = await self._count_remote_data_items(repo_data_path) if remote_mode else self._count_data_items(repo_data_path)
                 added = max(after_count - before_count, 0)
                 lines.extend([
                     f"✅ [{index}/{total}] {owner_repo} 更新完成 ({local_short} → {remote_short})",
-                    f"    📁 新增 {added} 个 | {repo['data_dir']}",
+                    f"    📁 新增 {added} 个 | {repo_data_path}",
                 ])
                 return {"status": "success", "updated": True, "lines": lines}
 
             lines.extend([f"❌ [{index}/{total}] {owner_repo} git reset 失败", f"    {output[:300]}"])
             return {"status": "failed", "updated": False, "lines": lines}
 
-        clone_cmd = ["git", "clone", "--depth", "1", repo["url"], clone_path]
-        ret, output = await self._run_repo_cmd(clone_cmd, cwd=workdir, remote=remote_mode)
+        clone_cmd = ["git", "clone", "--depth", "1", repo["url"], repo_clone_path]
+        ret, output = await self._run_repo_cmd(clone_cmd, cwd=workdir if not remote_mode else posixpath.dirname(repo_clone_path), remote=remote_mode)
         if ret == 0:
-            after_count = self._count_data_items(repo["data_dir"])
+            after_count = await self._count_remote_data_items(repo_data_path) if remote_mode else self._count_data_items(repo_data_path)
             lines.extend([
                 f"✅ [{index}/{total}] {owner_repo} 克隆完成",
-                f"    📁 新增 {after_count} 个 | {repo['data_dir']}",
+                f"    📁 新增 {after_count} 个 | {repo_data_path}",
             ])
             return {"status": "success", "updated": True, "lines": lines}
 
@@ -602,6 +638,17 @@ class MemeUpdater(Star):
             return 0
         return len([item for item in os.listdir(path) if not item.startswith(".")])
 
+    async def _count_remote_data_items(self, path: str) -> int:
+        ret, output = await self._run_remote_cmd(
+            f"if [ -d {shlex.quote(path)} ]; then find {shlex.quote(path)} -mindepth 1 -maxdepth 1 ! -name '.*' | wc -l; else echo 0; fi"
+        )
+        if ret != 0:
+            return 0
+        try:
+            return int(output.strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            return 0
+
     async def _meme_get_json(self, paths: list[str], session: aiohttp.ClientSession | None = None):
         errors = []
         timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
@@ -666,7 +713,7 @@ class MemeUpdater(Star):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for path in paths:
                 try:
-                    async with session.get(f"{self._get_meme_api_base_url()}{path}") as resp:
+                    async with session.get(f"{self._get_meme_api_base_url()}{path}", timeout=timeout) as resp:
                         data = await self._read_limited_response(resp)
                         content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
                         if resp.status < 400:
@@ -721,6 +768,50 @@ class MemeUpdater(Star):
             self._refresh_meme_shortcuts()
             logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
             return len(self.meme_infos)
+
+    def _ensure_meme_info_refresh_task(self) -> asyncio.Task | None:
+        if self.meme_infos:
+            return None
+        task = self._meme_info_refresh_task
+        if task and not task.done():
+            return task
+        if task and task.done():
+            try:
+                task.result()
+            except Exception as e:
+                logger.warning(f"后台刷新 meme API 表情信息失败: {e}")
+        self._meme_info_refresh_task = asyncio.create_task(self._refresh_meme_infos())
+        return self._meme_info_refresh_task
+
+    async def _wait_meme_info_refresh_for_shortcut(self) -> bool:
+        if self.meme_infos:
+            return True
+        task = self._ensure_meme_info_refresh_task()
+        if not task:
+            return bool(self.meme_infos)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=SHORTCUT_INITIALIZE_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            return False
+        except Exception as e:
+            logger.warning(f"快捷指令等待 meme API 表情信息初始化失败: {e}")
+            return False
+        return bool(self.meme_infos)
+
+    async def terminate(self):
+        task = self._meme_info_refresh_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._meme_info_refresh_task = None
+        parent_terminate = getattr(super(), "terminate", None)
+        if parent_terminate:
+            result = parent_terminate()
+            if asyncio.iscoroutine(result):
+                await result
 
     def _shortcut_entry(self, key: str, regex: str, args: list, options: dict) -> dict | None:
         if len(regex) > 120:
@@ -849,11 +940,10 @@ class MemeUpdater(Star):
 
     def _sender_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
-        raw_message = getattr(message_obj, "raw_message", None)
-        if isinstance(raw_message, dict):
-            user_id = str(raw_message.get("user_id") or "").strip()
-            if user_id:
-                return user_id
+        raw_event = self._raw_event_dict_from_event(event)
+        user_id = str(raw_event.get("user_id") or "").strip()
+        if user_id:
+            return user_id
         for source in (message_obj, event):
             for name in ("user_id", "sender_id"):
                 user_id = str(getattr(source, name, "") or "").strip()
@@ -867,13 +957,16 @@ class MemeUpdater(Star):
     def _sender_avatar_url(self, event: AstrMessageEvent) -> str:
         return self._avatar_url(self._sender_id(event))
 
-    def _bot_avatar_url(self, event: AstrMessageEvent) -> str:
+    def _bot_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
-        raw_message = getattr(message_obj, "raw_message", None)
-        bot_id = str(getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or "").strip()
-        if not bot_id and isinstance(raw_message, dict):
-            bot_id = str(raw_message.get("self_id", "")).strip()
-        return self._avatar_url(bot_id)
+        raw_event = self._raw_event_dict_from_event(event)
+        bot_id = str(raw_event.get("self_id") or raw_event.get("bot_id") or "").strip()
+        if bot_id:
+            return bot_id
+        return str(getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or "").strip()
+
+    def _bot_avatar_url(self, event: AstrMessageEvent) -> str:
+        return self._avatar_url(self._bot_id(event))
 
     def _group_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
@@ -977,11 +1070,7 @@ class MemeUpdater(Star):
         return {"name": name or sender_id, "gender": "unknown"}
 
     def _bot_user_info(self, event: AstrMessageEvent) -> dict:
-        message_obj = getattr(event, "message_obj", None)
-        raw_message = getattr(message_obj, "raw_message", None)
-        bot_id = str(getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or "").strip()
-        if not bot_id and isinstance(raw_message, dict):
-            bot_id = str(raw_message.get("self_id", "")).strip()
+        bot_id = self._bot_id(event)
         return {"name": bot_id or "机器人", "gender": "unknown"}
 
     async def _read_limited_response(self, resp: aiohttp.ClientResponse, limit: int | None = None) -> bytes:
@@ -1009,7 +1098,7 @@ class MemeUpdater(Star):
         except ValueError:
             return False
 
-    async def _validate_external_image_url(self, url: str) -> None:
+    async def _validate_external_image_url(self, url: str) -> tuple[str, set[str]]:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise RuntimeError("图片 URL 只支持 http/https")
@@ -1026,10 +1115,23 @@ class MemeUpdater(Star):
             infos = await asyncio.to_thread(socket.getaddrinfo, hostname, parsed.port, type=socket.SOCK_STREAM)
         except socket.gaierror as e:
             raise RuntimeError(f"图片 URL 域名解析失败：{e}") from e
+        resolved_ips = set()
         for info in infos:
             address = info[4][0]
+            resolved_ips.add(address)
             if self._is_forbidden_ip(address):
                 raise RuntimeError("不允许访问解析到内网或本机的地址")
+        return lowered, resolved_ips
+
+    def _response_peer_ip(self, resp: aiohttp.ClientResponse) -> str:
+        connection = getattr(resp, "connection", None)
+        transport = getattr(connection, "transport", None)
+        if transport is None:
+            return ""
+        peername = transport.get_extra_info("peername")
+        if isinstance(peername, tuple) and peername:
+            return str(peername[0] or "")
+        return ""
 
     def _validate_image_bytes(self, data: bytes, content_type: str) -> None:
         signatures = {
@@ -1049,8 +1151,15 @@ class MemeUpdater(Star):
     async def _request_external_image(self, session: aiohttp.ClientSession, url: str) -> tuple[bytes, str]:
         current_url = url
         for _ in range(5):
-            await self._validate_external_image_url(current_url)
+            _, resolved_ips = await self._validate_external_image_url(current_url)
             async with session.get(current_url, allow_redirects=False) as resp:
+                peer_ip = self._response_peer_ip(resp)
+                if not peer_ip:
+                    raise RuntimeError("无法确认图片下载的实际连接地址")
+                if self._is_forbidden_ip(peer_ip):
+                    raise RuntimeError("实际连接到了内网或本机地址")
+                if resolved_ips and peer_ip not in resolved_ips:
+                    raise RuntimeError("图片下载连接地址与校验结果不一致")
                 if 300 <= resp.status < 400:
                     location = resp.headers.get("Location")
                     if not location:
@@ -1380,10 +1489,13 @@ class MemeUpdater(Star):
             fill_items.append((sender_avatar, await self._sender_user_info(event)))
         if not fill_items:
             return
+        avatar_cache: dict[str, tuple[bytes, str, str]] = {}
         fill_index = 0
         while len(images) < target_count:
             url, user_info = fill_items[fill_index % len(fill_items)]
-            data, content_type, filename = await self._download_image(url)
+            if url not in avatar_cache:
+                avatar_cache[url] = await self._download_image(url)
+            data, content_type, filename = avatar_cache[url]
             images.append((data, content_type, filename))
             user_infos.append(user_info)
             fill_index += 1
@@ -1632,6 +1744,23 @@ class MemeUpdater(Star):
         repos = self._get_repos()
 
         for repo in repos:
+            if self._get_remote_enabled():
+                clone_path, data_path = self._remote_repo_paths(repo)
+                ret, _ = await self._run_remote_cmd(f"test -d {shlex.quote(clone_path)}")
+                if ret != 0:
+                    lines.append(f"[未克隆] {repo['name']} | {data_path}")
+                    continue
+
+                ret, commit_info = await self._run_repo_cmd(
+                    ["git", "log", "-1", "--format=%h %s (%cr)"], cwd=clone_path, remote=True
+                )
+                if ret == 0:
+                    count = await self._count_remote_data_items(data_path)
+                    lines.append(f"[已安装] {repo['name']} | {count} 项 | {data_path} | {commit_info}")
+                else:
+                    lines.append(f"[异常] {repo['name']}: 无法读取 git 信息 | {data_path}")
+                continue
+
             clone_path = repo["clone_dir"]
             data_path = repo["data_dir"]
 
@@ -1816,7 +1945,12 @@ class MemeUpdater(Star):
         if not content or content.startswith(("/", "#", "%", "％")):
             return
         if not self.meme_infos:
-            await self._refresh_meme_infos()
+            if not await self._wait_meme_info_refresh_for_shortcut():
+                yield event.plain_result("表情信息正在初始化，请稍后再试一次。")
+                self._stop_event(event)
+                return
+        if not self.meme_shortcuts:
+            self._refresh_meme_shortcuts()
         try:
             for shortcut in self.meme_shortcuts:
                 match = shortcut["compiled_regex"].match(content)
