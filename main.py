@@ -283,11 +283,6 @@ class MemeUpdater(Star):
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return "http://127.0.0.1:2233"
-        host = parsed.hostname.rstrip(".").lower()
-        if host in {"localhost", "127.0.0.1", "::1"}:
-            return value
-        if self._is_forbidden_ip(host):
-            return "http://127.0.0.1:2233"
         return value
 
     def _get_meme_request_timeout(self) -> int:
