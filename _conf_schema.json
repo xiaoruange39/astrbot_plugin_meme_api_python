@@ -29,6 +29,12 @@
     "type": "bool",
     "default": false
   },
+  "meme_disabled_keys": {
+    "description": "屏蔽指定表情包",
+    "hint": "填写 meme key 或中文关键词。屏蔽后不会出现在列表、详情、随机表情和快捷指令中。",
+    "type": "list",
+    "default": []
+  },
   "meme_shortcut_enabled": {
     "description": "启用表情快捷指令",
     "hint": "开启后会尝试匹配 meme API 返回的关键词和快捷正则。",

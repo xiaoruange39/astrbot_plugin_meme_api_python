@@ -325,6 +325,23 @@ class MemeUpdater(Star):
     def _get_meme_refresh_verbose_log(self) -> bool:
         return bool(self.config.get("meme_refresh_verbose_log", False))
 
+    def _get_disabled_meme_names(self) -> set[str]:
+        value = self.config.get("meme_disabled_keys", [])
+        if isinstance(value, str):
+            items = re.split(r"[\s,，]+", value)
+        elif isinstance(value, list):
+            items = value
+        else:
+            items = []
+        return {str(item).strip() for item in items if str(item).strip()}
+
+    def _is_meme_disabled(self, key: str, info: dict, disabled_names: set[str]) -> bool:
+        if not disabled_names:
+            return False
+        if key in disabled_names:
+            return True
+        return any(str(keyword).strip() in disabled_names for keyword in info.get("keywords", []))
+
     def _get_meme_list_text_template(self) -> str:
         return str(self.config.get("meme_list_text_template", "{index}. {keywords}")).strip() or "{index}. {keywords}"
 
@@ -759,6 +776,9 @@ class MemeUpdater(Star):
                 results = await asyncio.gather(*(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)), return_exceptions=True)
 
             entries = [r for r in results if r is not None and not isinstance(r, Exception)]
+            disabled_names = self._get_disabled_meme_names()
+            if disabled_names:
+                entries = [(key, info) for key, info in entries if not self._is_meme_disabled(key, info, disabled_names)]
             self.meme_infos = dict(entries)
             self._refresh_meme_shortcuts()
             logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
