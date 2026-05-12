@@ -26,8 +26,10 @@ import astrbot.api.message_components as Comp
 
 SCREEN_SESSION = "meme-generator"
 TEMP_IMAGE_TTL_SECONDS = 3600
+TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS = 300
 COMMAND_TIMEOUT_SECONDS = 120
 MAX_IMAGE_DOWNLOAD_CONCURRENCY = 4
+MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
 MIRAGETANK_KEY = "miragetank"
 
 DEFAULT_REPO_SPECS = [
@@ -86,6 +88,15 @@ def _format_keywords(keywords: list[str]) -> str:
 
 def _has_shell_control_chars(value: str) -> bool:
     return any(ord(char) < 32 or char in ";&|`$<>\n\r" for char in value)
+
+
+def _is_safe_relative_path(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    return bool(path) and not _has_shell_control_chars(path) and not os.path.isabs(path) and ".." not in parts
+
+
+def _is_safe_ssh_arg(value: str) -> bool:
+    return bool(value) and not value.startswith("-") and not _has_shell_control_chars(value)
 
 
 class ArgSyntaxError(SyntaxError):
@@ -147,6 +158,7 @@ class MemeUpdater(Star):
         self._meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
+        self._last_temp_cleanup = 0.0
 
     @property
     def meme_infos(self) -> dict[str, dict]:
@@ -188,10 +200,12 @@ class MemeUpdater(Star):
                 continue
             url = str(repo.get("url", "")).strip()
             data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
-            if not url or _has_shell_control_chars(url) or not data_subdir or _has_shell_control_chars(data_subdir) or os.path.isabs(data_subdir) or ".." in data_subdir.replace("\\", "/").split("/"):
+            if not url or _has_shell_control_chars(url) or not _is_safe_relative_path(data_subdir):
                 continue
             clone_dir = os.path.join(self._meme_data_dir, data_subdir)
             data_leaf = str(repo.get("data_leaf", "")).strip()
+            if data_leaf and not _is_safe_relative_path(data_leaf):
+                continue
             data_dir = os.path.join(clone_dir, data_leaf) if data_leaf else clone_dir
             name = os.path.basename(clone_dir) or url.rstrip("/").split("/")[-1].removesuffix(".git")
             result.append({
@@ -200,7 +214,7 @@ class MemeUpdater(Star):
                 "clone_dir": clone_dir,
                 "data_dir": data_dir,
             })
-        return result
+        return result or default_repos
 
     def _get_remote_enabled(self) -> bool:
         return bool(self.config.get("remote_enabled", False))
@@ -236,7 +250,16 @@ class MemeUpdater(Star):
         return SCREEN_SESSION if _has_shell_control_chars(container) else container
 
     def _get_meme_api_base_url(self) -> str:
-        return str(self.config.get("meme_api_base_url", "http://127.0.0.1:2233")).strip().rstrip("/")
+        value = str(self.config.get("meme_api_base_url", "http://127.0.0.1:2233")).strip().rstrip("/")
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return "http://127.0.0.1:2233"
+        host = parsed.hostname.rstrip(".").lower()
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return value
+        if self._is_forbidden_ip(host):
+            return "http://127.0.0.1:2233"
+        return value
 
     def _get_meme_request_timeout(self) -> int:
         try:
@@ -314,24 +337,30 @@ class MemeUpdater(Star):
         port = self._get_remote_port()
         mode = self._get_remote_auth_mode()
         key_path = self._get_remote_key_path()
+        if not _is_safe_ssh_arg(host):
+            raise ValueError("远程主机配置不合法")
+        if user and not _is_safe_ssh_arg(user):
+            raise ValueError("远程用户配置不合法")
+        if key_path and not _is_safe_ssh_arg(key_path):
+            raise ValueError("远程私钥路径配置不合法")
         destination = f"{user}@{host}" if user else host
         args = ["ssh", "-p", str(port)]
         if mode == "私钥登录" and key_path:
             args.extend(["-i", key_path])
         if mode == "密码登录":
             args.extend(["-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"])
-        args.append(destination)
+        args.extend(["--", destination])
         return args
 
     def _shell_join(self, args: list[str]) -> str:
         return " ".join(shlex.quote(str(arg)) for arg in args)
 
-    async def _run_remote_cmd(self, cmd: str) -> tuple[int, str]:
+    async def _run_remote_cmd(self, cmd: str, timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[int, str]:
         if self._get_remote_auth_mode() == "密码登录" and platform.system() == "Windows":
             return -1, "Windows 环境不支持 SSH_ASKPASS 密码登录，请改用私钥登录"
         remote_cmd, env = self._build_remote_cmd(cmd)
         try:
-            return await self._run_cmd([*self._ssh_base_args(), remote_cmd], env=env)
+            return await self._run_cmd([*self._ssh_base_args(), remote_cmd], env=env, timeout=timeout)
         finally:
             if "SSH_ASKPASS" in env:
                 try:
@@ -339,17 +368,27 @@ class MemeUpdater(Star):
                 except OSError:
                     pass
 
+    def _get_repo_cmd_timeout(self, cmd: list[str] | str) -> int:
+        if isinstance(cmd, str):
+            normalized = cmd.lower()
+        else:
+            normalized = " ".join(str(part).lower() for part in cmd)
+        if "git clone" in normalized or "git fetch" in normalized:
+            return max(COMMAND_TIMEOUT_SECONDS, 600)
+        return COMMAND_TIMEOUT_SECONDS
+
     async def _run_repo_cmd(self, cmd: list[str] | str, cwd: str | None = None, remote: bool = False) -> tuple[int, str]:
+        timeout = self._get_repo_cmd_timeout(cmd)
         if remote:
             remote_cmd = self._shell_join(cmd) if isinstance(cmd, list) else cmd
             if cwd:
                 remote_cmd = f"cd {shlex.quote(cwd)} && {remote_cmd}"
-            return await self._run_remote_cmd(remote_cmd)
+            return await self._run_remote_cmd(remote_cmd, timeout=timeout)
         if isinstance(cmd, list):
-            return await self._run_cmd(cmd, cwd=cwd)
-        return await self._run_shell_cmd(cmd, cwd=cwd)
+            return await self._run_cmd(cmd, cwd=cwd, timeout=timeout)
+        return await self._run_shell_cmd(cmd, cwd=cwd, timeout=timeout)
 
-    async def _run_cmd(self, cmd: list[str], cwd: str | None = None, env: dict | None = None) -> tuple[int, str]:
+    async def _run_cmd(self, cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[int, str]:
         run_env = os.environ.copy()
         if env:
             run_env.update(env)
@@ -361,14 +400,14 @@ class MemeUpdater(Star):
             env=run_env,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT_SECONDS)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            return -1, f"命令执行超时（{COMMAND_TIMEOUT_SECONDS}秒）"
+            return -1, f"命令执行超时（{timeout}秒）"
         return int(proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
 
-    async def _run_shell_cmd(self, cmd: str, cwd: str | None = None, env: dict | None = None) -> tuple[int, str]:
+    async def _run_shell_cmd(self, cmd: str, cwd: str | None = None, env: dict | None = None, timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[int, str]:
         run_env = os.environ.copy()
         if env:
             run_env.update(env)
@@ -380,11 +419,11 @@ class MemeUpdater(Star):
             env=run_env,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT_SECONDS)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            return -1, f"命令执行超时（{COMMAND_TIMEOUT_SECONDS}秒）"
+            return -1, f"命令执行超时（{timeout}秒）"
         return int(proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
 
     def _format_time(self, dt: datetime) -> str:
@@ -450,6 +489,15 @@ class MemeUpdater(Star):
             if local_commit == remote_commit:
                 lines.append(f"✅ [{index}/{total}] {owner_repo} 无更新 ({local_short})")
                 return {"status": "success", "updated": False, "lines": lines}
+
+            status_cmd = ["git", "status", "--porcelain"]
+            ret, status_output = await self._run_repo_cmd(status_cmd, cwd=clone_path, remote=remote_mode)
+            if ret != 0:
+                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法检查本地修改", f"    {status_output[:300]}"])
+                return {"status": "failed", "updated": False, "lines": lines}
+            if status_output.strip():
+                lines.extend([f"⚠️ [{index}/{total}] {owner_repo} 存在本地修改，已跳过覆盖更新", f"    {status_output[:300]}"])
+                return {"status": "failed", "updated": False, "lines": lines}
 
             reset_cmd = ["git", "reset", "--hard", f"origin/{branch}"]
             ret, output = await self._run_repo_cmd(reset_cmd, cwd=clone_path, remote=remote_mode)
@@ -560,10 +608,17 @@ class MemeUpdater(Star):
 
         async def request_once(active_session: aiohttp.ClientSession, path: str):
             async with active_session.get(f"{self._get_meme_api_base_url()}{path}", timeout=timeout) as resp:
-                text = await resp.text()
-                if resp.status < 400:
+                data = await self._read_limited_response(resp, MAX_JSON_RESPONSE_BYTES)
+                text = data.decode("utf-8", errors="replace")
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+                content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                if content_type and content_type not in {"application/json", "text/json"} and not content_type.endswith("+json"):
+                    raise RuntimeError(f"meme API 返回非 JSON 内容：{content_type}")
+                try:
                     return json.loads(text) if text else None
-                raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"meme API JSON 解析失败：{e.msg}，响应片段：{text[:120]}") from e
 
         for attempt in range(1, 4):
             if session:
@@ -1279,7 +1334,11 @@ class MemeUpdater(Star):
         image_urls.extend(avatar_urls)
         user_infos.extend(avatar_user_infos)
         if image_urls:
-            logger.info(f"meme 参数图片来源：{image_urls}，当前发送者={self._sender_id(event)}")
+            hosts = []
+            for url in image_urls:
+                host = urlparse(url).hostname
+                hosts.append(host or "unknown")
+            logger.info(f"meme 参数图片数量：{len(image_urls)}，来源域名：{hosts}，当前发送者={self._sender_id(event)}")
         if image_urls:
             semaphore = asyncio.Semaphore(MAX_IMAGE_DOWNLOAD_CONCURRENCY)
 
@@ -1382,6 +1441,12 @@ class MemeUpdater(Star):
         except Exception:
             return 0
 
+    def _meme_keyword_sort_value(self, info: dict) -> str:
+        keywords = info.get("keywords")
+        if isinstance(keywords, list) and keywords:
+            return str(keywords[0]).lower()
+        return ""
+
     def _sorted_meme_infos(self) -> list[dict]:
         sort_by = self._get_meme_list_sort_by()
         reverse = self._get_meme_list_sort_reverse()
@@ -1389,7 +1454,7 @@ class MemeUpdater(Star):
         if sort_by == "名称":
             return sorted(infos, key=lambda info: str(info.get("key", "")).lower(), reverse=reverse)
         if sort_by == "关键词":
-            return sorted(infos, key=lambda info: str((info.get("keywords") or [""])[0]).lower(), reverse=reverse)
+            return sorted(infos, key=self._meme_keyword_sort_value, reverse=reverse)
         if sort_by == "更新时间":
             return sorted(infos, key=lambda info: self._parse_meme_time(info.get("date_modified")), reverse=reverse)
         return sorted(infos, key=lambda info: self._parse_meme_time(info.get("date_created")), reverse=reverse)
@@ -1421,7 +1486,10 @@ class MemeUpdater(Star):
         try:
             temp_dir = os.path.join(self._meme_data_dir, "temp")
             os.makedirs(temp_dir, exist_ok=True)
-            self._cleanup_temp_images(temp_dir)
+            now = time.time()
+            if now - self._last_temp_cleanup >= TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS:
+                self._cleanup_temp_images(temp_dir, now)
+                self._last_temp_cleanup = now
             with tempfile.NamedTemporaryFile(suffix=ext, dir=temp_dir, delete=False) as tf:
                 tf.write(data)
                 temp_path = tf.name
@@ -1432,8 +1500,8 @@ class MemeUpdater(Star):
             b64 = base64.b64encode(data).decode("ascii")
             return Comp.Image(file=f"base64://{b64}")
 
-    def _cleanup_temp_images(self, temp_dir: str) -> None:
-        expires_before = time.time() - TEMP_IMAGE_TTL_SECONDS
+    def _cleanup_temp_images(self, temp_dir: str, now: float | None = None) -> None:
+        expires_before = (now or time.time()) - TEMP_IMAGE_TTL_SECONDS
         for name in os.listdir(temp_dir):
             path = os.path.join(temp_dir, name)
             try:
@@ -1469,85 +1537,92 @@ class MemeUpdater(Star):
 
     @filter.command("重启memeapi")
     async def restart_memeapi(self, event: AstrMessageEvent):
-        self._stop_event(event)
-        yield event.plain_result("正在重启 memeapi 服务，请稍候...")
-        result = await self._restart_memeapi()
-        yield event.plain_result("\n".join(result["lines"]))
+        try:
+            yield event.plain_result("正在重启 memeapi 服务，请稍候...")
+            result = await self._restart_memeapi()
+            yield event.plain_result("\n".join(result["lines"]))
+        finally:
+            self._stop_event(event)
 
     @filter.command("更新表情包")
     async def update_memes(self, event: AstrMessageEvent):
-        self._stop_event(event)
-        yield event.plain_result("正在更新表情包数据，请稍候...")
+        try:
+            yield event.plain_result("正在更新表情包数据，请稍候...")
 
-        os.makedirs(self._meme_data_dir, exist_ok=True)
+            os.makedirs(self._meme_data_dir, exist_ok=True)
 
-        started_at = datetime.now()
-        repos = self._get_repos()
-        total = len(repos)
-        semaphore = asyncio.Semaphore(self._get_repo_update_concurrency())
+            started_at = datetime.now()
+            repos = self._get_repos()
+            total = len(repos)
+            semaphore = asyncio.Semaphore(self._get_repo_update_concurrency())
 
-        async def sync_limited(repo: dict, index: int):
-            async with semaphore:
-                return await self._sync_repo(repo, index, total)
+            async def sync_limited(repo: dict, index: int):
+                async with semaphore:
+                    return await self._sync_repo(repo, index, total)
 
-        results = await asyncio.gather(*[sync_limited(repo, i + 1) for i, repo in enumerate(repos)], return_exceptions=True)
-        normalized_results = []
-        for i, result in enumerate(results, 1):
-            if isinstance(result, Exception):
-                normalized_results.append({"status": "failed", "updated": False, "lines": [f"❌ [{i}/{total}] 更新异常", f"    {result}"]})
-            else:
-                normalized_results.append(result)
-        results = normalized_results
-        success = sum(1 for r in results if r["status"] == "success")
-        success_updates = [r for r in results if r["status"] == "success" and r["updated"]]
-        failed = sum(1 for r in results if r["status"] == "failed")
-        updated = sum(1 for r in results if r["updated"])
+            results = await asyncio.gather(*[sync_limited(repo, i + 1) for i, repo in enumerate(repos)], return_exceptions=True)
+            normalized_results = []
+            for i, result in enumerate(results, 1):
+                if isinstance(result, Exception):
+                    normalized_results.append({"status": "failed", "updated": False, "lines": [f"❌ [{i}/{total}] 更新异常", f"    {result}"]})
+                else:
+                    normalized_results.append(result)
+            results = normalized_results
+            success = sum(1 for r in results if r["status"] == "success")
+            success_updates = [r for r in results if r["status"] == "success" and r["updated"]]
+            failed = sum(1 for r in results if r["status"] == "failed")
+            updated = sum(1 for r in results if r["updated"])
 
-        restart_result = await self._restart_memeapi() if failed == 0 else {"success": False, "lines": ["准备重启 memeapi...", "⚠️ 有仓库更新失败，已跳过重启"]}
+            restart_result = await self._restart_memeapi()
 
-        if restart_result["success"]:
-            restart_result["lines"].append("⏳ 等待 meme API 启动后刷新表情信息...")
-            await asyncio.sleep(5)
-            try:
-                count = await self._refresh_meme_infos(force=True)
-                restart_result["lines"].append(f"✅ 已刷新表情信息，共载入 {count} 个表情")
-            except Exception as e:
-                restart_result["lines"].append(f"⚠️ 刷新表情信息失败：{e}")
+            if restart_result["success"]:
+                restart_result["lines"].append("⏳ 等待 meme API 启动后刷新表情信息...")
+                await asyncio.sleep(5)
+                try:
+                    count = await self._refresh_meme_infos(force=True)
+                    restart_result["lines"].append(f"✅ 已刷新表情信息，共载入 {count} 个表情")
+                except Exception as e:
+                    restart_result["lines"].append(f"⚠️ 刷新表情信息失败：{e}")
 
-        finished_at = datetime.now()
-        summary_lines = [
-            "========================",
-            "📋 更新任务执行完成",
-            f"⏰ {self._format_time(started_at)} → {self._format_time(finished_at)} ({(finished_at - started_at).total_seconds():.2f}秒)",
-            f"📊 成功:{success} 失败:{failed} 更新:{updated}",
-            "========================",
-            "🔌 开始执行 meme 仓库更新任务",
-            f"⏰ 开始时间: {self._format_time(started_at)}",
-            "========================",
-        ]
+            finished_at = datetime.now()
+            summary_lines = [
+                "========================",
+                "📋 更新任务执行完成",
+                f"⏰ {self._format_time(started_at)} → {self._format_time(finished_at)} ({(finished_at - started_at).total_seconds():.2f}秒)",
+                f"📊 成功:{success} 失败:{failed} 更新:{updated}",
+                "========================",
+                "🔌 开始执行 meme 仓库更新任务",
+                f"⏰ 开始时间: {self._format_time(started_at)}",
+                "========================",
+            ]
 
-        for result in results:
-            summary_lines.extend(result["lines"])
+            for result in results:
+                summary_lines.extend(result["lines"])
 
-        if success_updates:
-            summary_lines.extend(["========================", "✅ 成功更新的仓库:"])
-            for result in success_updates:
-                success_line = next(
-                    (line.strip() for line in result["lines"] if "完成" in line and "📦" not in line),
-                    result["lines"][-1],
-                )
-                summary_lines.append(f"  - {success_line}")
+            if success_updates:
+                summary_lines.extend(["========================", "✅ 成功更新的仓库:"])
+                for result in success_updates:
+                    success_line = next(
+                        (line.strip() for line in result["lines"] if "完成" in line and "📦" not in line),
+                        result["lines"][-1],
+                    )
+                    summary_lines.append(f"  - {success_line}")
 
-        summary_lines.extend([
-            f"📊 仓库更新统计: 成功 {success} | 失败 {failed} | 有更新 {updated}",
-            "准备重启 memeapi...",
-        ])
+            summary_lines.extend([
+                f"📊 仓库更新统计: 成功 {success} | 失败 {failed} | 有更新 {updated}",
+                "准备重启 memeapi...",
+            ])
 
-        summary_lines.extend(restart_result["lines"])
-        summary_lines.append("========================")
-        summary_lines.append(f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}")
+            summary_lines.extend(restart_result["lines"])
+            summary_lines.append("========================")
+            summary_lines.append(f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}")
 
-        yield event.plain_result("\n".join(summary_lines))
+            yield event.plain_result("\n".join(summary_lines))
+        except Exception as e:
+            logger.exception("更新表情包失败")
+            yield event.plain_result(f"更新表情包失败：{e}")
+        finally:
+            self._stop_event(event)
 
     @filter.command("表情包状态")
     async def meme_status(self, event: AstrMessageEvent):
