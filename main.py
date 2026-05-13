@@ -16,7 +16,6 @@ import posixpath
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
-from quart import jsonify
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.star import Context, Star, StarTools, register
@@ -25,6 +24,7 @@ from astrbot.api.event.filter import EventMessageType
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 import astrbot.api.message_components as Comp
+from .usage_stats import MemeUsageStats
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:
@@ -181,37 +181,18 @@ class MemeUpdater(Star):
         self._meme_info_lock = asyncio.Lock()
         self._meme_info_refresh_task: asyncio.Task | None = None
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
-        self._meme_usage_path = str(StarTools.get_data_dir() / "meme_usage.json")
-        self._meme_usage_lock = asyncio.Lock()
         self._last_temp_cleanup = 0.0
-
-        # 注册 Web API 用于 Plugin Page
-        # 必须包含插件 ID 作为路径前缀，确保 bridge.apiGet('stats') 能正确路由
-        plugin_id = "astrbot_plugin_meme_api_python"
-        context.register_web_api(
-            f"/{plugin_id}/stats",
-            self.web_get_stats,
-            ["GET"],
-            "获取表情统计数据",
+        self.usage_stats = MemeUsageStats(
+            config,
+            str(StarTools.get_data_dir() / "meme_usage.json"),
+            lambda: self.meme_infos,
+            self._meme_display_name,
+            self._safe_int,
+            self._group_id,
+            self._group_name_from_event,
+            self._lookup_group_name,
         )
-        context.register_web_api(
-            f"/{plugin_id}/reset",
-            self.web_reset_stats,
-            ["GET"],
-            "清空表情统计数据",
-        )
-        context.register_web_api(
-            f"/{plugin_id}/delete",
-            self.web_delete_stats,
-            ["GET"],
-            "删除特定表情统计记录",
-        )
-        context.register_web_api(
-            f"/{plugin_id}/group-name",
-            self.web_get_group_name,
-            ["GET"],
-            "获取群组名称",
-        )
+        self.usage_stats.register_web_apis(context, "astrbot_plugin_meme_api_python")
 
     @property
     def meme_infos(self) -> dict[str, dict]:
@@ -387,15 +368,6 @@ class MemeUpdater(Star):
 
     def _get_meme_search_forward_enabled(self) -> bool:
         return bool(self.config.get("meme_search_forward_enabled", True))
-
-    def _get_meme_usage_stats_limit(self) -> int:
-        try:
-            return max(1, int(self.config.get("meme_usage_stats_limit", 100)))
-        except (TypeError, ValueError):
-            return 100
-
-    def _get_meme_usage_stats_title(self) -> str:
-        return str(self.config.get("meme_usage_stats_title", "表情调用统计")).strip() or "表情调用统计"
 
     def _get_meme_list_text_template(self) -> str:
         return str(self.config.get("meme_list_text_template", "{index}. {keywords}")).strip() or "{index}. {keywords}"
@@ -972,180 +944,6 @@ class MemeUpdater(Star):
     def _format_meme_search_result(self, index: int, info: dict) -> str:
         return f"{index}. {self._meme_display_name(info)}"
 
-    def _load_meme_usage(self) -> dict[str, dict]:
-        try:
-            with open(self._meme_usage_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except FileNotFoundError:
-            return {}
-        except Exception as e:
-            logger.warning(f"读取表情调用统计失败: {e}")
-            return {}
-
-    def _normalize_meme_usage_data(self, data: dict) -> dict:
-        if "global" in data or "groups" in data:
-            global_usage = data.get("global") if isinstance(data.get("global"), dict) else {}
-            groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-            group_names = data.get("group_names") if isinstance(data.get("group_names"), dict) else {}
-            return {"global": global_usage, "groups": groups, "group_names": group_names}
-        return {"global": data, "groups": {}, "group_names": {}}
-
-    def _usage_bucket(self, data: dict, scope: str, group_id: str = "") -> dict:
-        normalized = self._normalize_meme_usage_data(data)
-        if scope == "group" and group_id:
-            groups = normalized.setdefault("groups", {})
-            bucket = groups.get(group_id)
-            if not isinstance(bucket, dict):
-                bucket = {}
-                groups[group_id] = bucket
-            return bucket
-        bucket = normalized.setdefault("global", {})
-        return bucket if isinstance(bucket, dict) else {}
-
-    def _save_meme_usage(self, data: dict[str, dict]) -> None:
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(self._meme_usage_path)), exist_ok=True)
-            with open(self._meme_usage_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"表情统计数据已保存至: {self._meme_usage_path}")
-        except Exception as e:
-            logger.error(f"保存表情统计数据失败: {e}")
-
-    # --- Web API 处理函数 ---
-
-    async def web_get_stats(self):
-        """Plugin Page 获取统计数据"""
-        try:
-            data = self._load_meme_usage()
-            normalized = self._normalize_meme_usage_data(data)
-            logger.info(f"Plugin Page 请求统计数据，当前记录数: {len(normalized.get('global', {}))}")
-            # 手动构建响应，确保内容类型和格式
-            return json.dumps(normalized, ensure_ascii=False), 200, {"Content-Type": "application/json; charset=utf-8"}
-        except Exception as e:
-            logger.error(f"Plugin Page 获取统计失败: {e}")
-            return jsonify({"global": {}, "groups": {}, "error": str(e)})
-
-    async def web_reset_stats(self):
-        """Plugin Page 清空所有统计"""
-        async with self._meme_usage_lock:
-            self._save_meme_usage({"global": {}, "groups": {}, "group_names": {}})
-        return json.dumps({"success": True, "message": "统计数据已清空"}), 200, {"Content-Type": "application/json; charset=utf-8"}
-
-    async def web_get_group_name(self):
-        from quart import request
-        try:
-            group_id = str(request.args.get("group_id", "")).strip()
-            if not group_id:
-                return json.dumps({"success": False, "message": "未提供 group_id"}), 400, {"Content-Type": "application/json; charset=utf-8"}
-            data = self._normalize_meme_usage_data(self._load_meme_usage())
-            cached_name = str(data.get("group_names", {}).get(group_id) or "").strip()
-            group_name = cached_name
-            if group_name:
-                async with self._meme_usage_lock:
-                    data = self._normalize_meme_usage_data(self._load_meme_usage())
-                    data.setdefault("group_names", {})[group_id] = group_name
-                    self._save_meme_usage(data)
-            return json.dumps({"success": True, "group_id": group_id, "group_name": group_name or ""}, ensure_ascii=False), 200, {"Content-Type": "application/json; charset=utf-8"}
-        except Exception as e:
-            return json.dumps({"success": False, "message": str(e)}), 500, {"Content-Type": "application/json; charset=utf-8"}
-
-    async def web_delete_stats(self):
-        """Plugin Page 删除单条统计记录"""
-        from quart import request
-        try:
-            args = request.args
-            key = args.get("key", "")
-            scope = args.get("scope", "global")
-            group_id = args.get("group_id", "")
-            delete_all = args.get("all", "") == "1"
-
-            async with self._meme_usage_lock:
-                data = self._normalize_meme_usage_data(self._load_meme_usage())
-                if delete_all:
-                    if scope == "global":
-                        data["global"] = {}
-                    elif scope == "group" and group_id in data["groups"]:
-                        del data["groups"][group_id]
-                    self._save_meme_usage(data)
-                    return json.dumps({"success": True, "message": "统计数据已删除"}), 200, {"Content-Type": "application/json; charset=utf-8"}
-
-                if not key:
-                    return json.dumps({"success": False, "message": "未提供 meme key"}), 400, {"Content-Type": "application/json; charset=utf-8"}
-
-                if scope == "global":
-                    if key in data["global"]:
-                        del data["global"][key]
-                elif scope == "group" and group_id:
-                    if group_id in data["groups"] and key in data["groups"][group_id]:
-                        del data["groups"][group_id][key]
-
-                self._save_meme_usage(data)
-
-            return json.dumps({"success": True, "message": f"记录 {key} 已删除"}), 200, {"Content-Type": "application/json; charset=utf-8"}
-        except Exception as e:
-            return json.dumps({"success": False, "message": str(e)}), 500, {"Content-Type": "application/json; charset=utf-8"}
-
-    # --- 统计辅助函数 ---
-
-    def _increment_usage_item(self, bucket: dict, key: str, info: dict, now: int) -> None:
-        item = bucket.get(key)
-        if not isinstance(item, dict):
-            item = {}
-        item["count"] = self._safe_int(item.get("count")) + 1
-        item["name"] = self._meme_display_name(info)
-        item["last_used"] = now
-        bucket[key] = item
-
-    async def _record_meme_usage(self, event: AstrMessageEvent, info: dict) -> None:
-        key = str(info.get("key") or "").strip()
-        if not key:
-            return
-        async with self._meme_usage_lock:
-            data = self._normalize_meme_usage_data(self._load_meme_usage())
-            now = int(time.time())
-            self._increment_usage_item(self._usage_bucket(data, "global"), key, info, now)
-            group_id = self._group_id(event)
-            if group_id:
-                self._increment_usage_item(self._usage_bucket(data, "group", group_id), key, info, now)
-                group_name = self._group_name_from_event(event, group_id) or await self._lookup_group_name(event, group_id)
-                if group_name:
-                    data.setdefault("group_names", {})[group_id] = group_name
-            self._save_meme_usage(data)
-
-    def _meme_usage_display_name(self, key: str, scope: str = "global", group_id: str = "") -> str:
-        info = self.meme_infos.get(key) or {}
-        if info:
-            name = self._meme_display_name(info)
-            if name and name != key:
-                return name
-        item = self._usage_bucket(self._load_meme_usage(), scope, group_id).get(key)
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-            if name:
-                return name
-        return key
-
-    def _meme_usage_rows(self, limit: int | None = None, scope: str = "global", group_id: str = "") -> list[tuple[str, int]]:
-        data = self._load_meme_usage()
-        bucket = self._usage_bucket(data, scope, group_id)
-        rows = []
-        for key, item in bucket.items():
-            if isinstance(item, dict):
-                count = self._safe_int(item.get("count"))
-            else:
-                count = self._safe_int(item)
-            if count > 0:
-                rows.append((str(key), count))
-        rows.sort(key=lambda row: row[1], reverse=True)
-        return rows[:limit or self._get_meme_usage_stats_limit()]
-
-    def _format_meme_usage_text(self, rows: list[tuple[str, int]]) -> str:
-        total = sum(count for _, count in self._meme_usage_rows(10**9))
-        lines = [self._get_meme_usage_stats_title(), f"表情调用总次数：{total}"]
-        lines.extend(f"{index}. {self._meme_usage_display_name(key)}：{count} 次" for index, (key, count) in enumerate(rows, 1))
-        return "\n".join(lines)
-
     def _font_supports_usage_text(self, font) -> bool:
         try:
             for char in "表情调用统计次数摸春日燕归来骑马":
@@ -1269,7 +1067,7 @@ class MemeUpdater(Star):
         card_w, card_h = 250 * scale, 82 * scale
         gap_x, gap_y = 22 * scale, 20 * scale
         margin_x, top_h, bottom = 58 * scale, 178 * scale, 58 * scale
-        shown_rows = rows[:self._get_meme_usage_stats_limit()]
+        shown_rows = rows[:self.usage_stats.limit()]
         row_count = max(1, (len(shown_rows) + columns - 1) // columns)
         width = margin_x * 2 + columns * card_w + (columns - 1) * gap_x
         height = top_h + row_count * card_h + (row_count - 1) * gap_y + bottom
@@ -1283,10 +1081,10 @@ class MemeUpdater(Star):
         name_font = self._load_usage_font(21 * scale)
         rank_font = self._load_usage_font(14 * scale)
         count_font = self._load_usage_font(17 * scale)
-        title = title_override or self._get_meme_usage_stats_title()
+        title = title_override or self.usage_stats.title()
         title_box = draw.textbbox((0, 0), title, font=title_font)
         draw.text(((width - (title_box[2] - title_box[0])) // 2, 42 * scale), title, font=title_font, fill="#14213d")
-        total = sum(count for _, count in self._meme_usage_rows(10**9, scope, group_id))
+        total = sum(count for _, count in self.usage_stats.rows(10**9, scope, group_id))
         subtitle = f"表情调用总次数 · {total}"
         subtitle_w, _ = self._text_size(draw, subtitle, subtitle_font)
         pill_box = ((width - subtitle_w - 52 * scale) // 2, 103 * scale, (width + subtitle_w + 52 * scale) // 2, 143 * scale)
@@ -1306,7 +1104,7 @@ class MemeUpdater(Star):
             draw.rounded_rectangle((x + 14 * scale, y + card_h - 13 * scale - accent_h, x + 19 * scale, y + card_h - 13 * scale), radius=3 * scale, fill="#5b8def")
             rank = f"#{index + 1}"
             draw.text((x + 30 * scale, y + 16 * scale), rank, font=rank_font, fill="#9aa9b8")
-            self._draw_usage_text(draw, (x + 30 * scale, y + 40 * scale), self._meme_usage_display_name(key, scope, group_id), name_font, "#1f2d3d", card_w - 112 * scale)
+            self._draw_usage_text(draw, (x + 30 * scale, y + 40 * scale), self.usage_stats.display_name(key, scope, group_id), name_font, "#1f2d3d", card_w - 112 * scale)
             count_text = f"{count} 次"
             count_box = draw.textbbox((0, 0), count_text, font=count_font)
             count_w = count_box[2] - count_box[0]
@@ -2364,7 +2162,7 @@ class MemeUpdater(Star):
         self._stop_event(event)
         group_id = self._group_id(event)
         scope = "group" if group_id else "global"
-        rows = self._meme_usage_rows(scope=scope, group_id=group_id)
+        rows = self.usage_stats.rows(scope=scope, group_id=group_id)
         if not rows:
             yield event.plain_result("当前群组暂无表情调用统计。" if group_id else "暂无表情调用统计。")
             return
@@ -2374,12 +2172,12 @@ class MemeUpdater(Star):
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"生成表情调用统计图失败: {e}")
-            yield event.plain_result(self._format_meme_usage_text(rows))
+            yield event.plain_result(self.usage_stats.format_text(rows))
 
     @filter.command("总表情统计")
     async def meme_global_usage_stats(self, event: AstrMessageEvent):
         self._stop_event(event)
-        rows = self._meme_usage_rows(scope="global")
+        rows = self.usage_stats.rows(scope="global")
         if not rows:
             yield event.plain_result("暂无表情调用统计。")
             return
@@ -2389,7 +2187,7 @@ class MemeUpdater(Star):
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"生成总表情调用统计图失败: {e}")
-            yield event.plain_result(self._format_meme_usage_text(rows))
+            yield event.plain_result(self.usage_stats.format_text(rows))
 
     @filter.command("meme搜索")
     async def meme_search(self, event: AstrMessageEvent):
@@ -2495,7 +2293,7 @@ class MemeUpdater(Star):
                 yield event.plain_result(f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。")
                 return
             image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
-            await self._record_meme_usage(event, info)
+            await self.usage_stats.record(event, info)
             async for result in self._yield_and_stop(event, event.chain_result([self._image_component(image, content_type)])):
                 yield result
         except ArgSyntaxError as e:
@@ -2528,7 +2326,7 @@ class MemeUpdater(Star):
                         await self._fill_default_avatar_images(event, render_images, render_user_infos, params["min_images"])
                     render_texts = [str(v) for v in params["default_texts"]] if auto_use else texts
                     image, content_type = await self._render_meme(str(info.get("key")), render_images, render_texts, render_user_infos, options)
-                    await self._record_meme_usage(event, info)
+                    await self.usage_stats.record(event, info)
                     keywords = _format_keywords([str(v) for v in info.get("keywords", [])])
                     async for result in self._yield_and_stop(event, event.chain_result([
                         Comp.Plain(f"关键词：{keywords}\n"),
@@ -2614,7 +2412,7 @@ class MemeUpdater(Star):
                     continue
 
                 image, content_type = await self._render_meme(key, images, texts, user_infos, options)
-                await self._record_meme_usage(event, info)
+                await self.usage_stats.record(event, info)
                 yield event.chain_result([self._image_component(image, content_type)])
                 self._stop_event(event)
                 return

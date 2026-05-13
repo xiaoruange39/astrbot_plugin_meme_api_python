@@ -59,9 +59,10 @@
       .spark { width: 110px; height: 38px; opacity: 1; position: relative; z-index: 1; flex: none; }
 
       .content { min-width: 0; padding: 30px; overflow: auto; }
-      .detail-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
-      .title-block { text-align: center; flex: 1; padding-left: 92px; }
+      .detail-head { position: relative; display: flex; justify-content: center; gap: 16px; align-items: flex-start; }
+      .title-block { text-align: center; flex: 1; }
       .title-block h2 { font-size: 22px; margin-bottom: 0; }
+      #deleteScope { position: absolute; right: 0; top: 0; }
       .hero { text-align: center; margin: 24px 0 28px; }
       .hero-count { font-size: 44px; line-height: 1; font-weight: 800; color: var(--danger); letter-spacing: -1px; }
       .hero-sub { color: var(--muted); margin-top: 10px; }
@@ -109,6 +110,7 @@
         .detail-head { align-items: center; }
         .title-block { padding-left: 0; text-align: left; min-width: 0; }
         .title-block h2 { font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        #deleteScope { position: static; }
         .hero { margin: 18px 0 20px; }
         .hero-count { font-size: 38px; }
         .hero-sub { font-size: 14px; }
