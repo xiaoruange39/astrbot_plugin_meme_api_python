@@ -7,6 +7,7 @@ import random
 import socket
 import asyncio
 import tempfile
+import io
 import time
 import ipaddress
 import mimetypes
@@ -23,6 +24,10 @@ from astrbot.api.event.filter import EventMessageType
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 import astrbot.api.message_components as Comp
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = ImageDraw = ImageFont = None
 
 SCREEN_SESSION = "meme-generator"
 TEMP_IMAGE_TTL_SECONDS = 3600
@@ -174,6 +179,8 @@ class MemeUpdater(Star):
         self._meme_info_lock = asyncio.Lock()
         self._meme_info_refresh_task: asyncio.Task | None = None
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
+        self._meme_usage_path = str(StarTools.get_data_dir() / "meme_usage.json")
+        self._meme_usage_lock = asyncio.Lock()
         self._last_temp_cleanup = 0.0
 
     @property
@@ -350,6 +357,15 @@ class MemeUpdater(Star):
 
     def _get_meme_search_forward_enabled(self) -> bool:
         return bool(self.config.get("meme_search_forward_enabled", True))
+
+    def _get_meme_usage_stats_limit(self) -> int:
+        try:
+            return max(1, int(self.config.get("meme_usage_stats_limit", 100)))
+        except (TypeError, ValueError):
+            return 100
+
+    def _get_meme_usage_stats_title(self) -> str:
+        return str(self.config.get("meme_usage_stats_title", "表情调用统计")).strip() or "表情调用统计"
 
     def _get_meme_list_text_template(self) -> str:
         return str(self.config.get("meme_list_text_template", "{index}. {keywords}")).strip() or "{index}. {keywords}"
@@ -926,13 +942,295 @@ class MemeUpdater(Star):
     def _format_meme_search_result(self, index: int, info: dict) -> str:
         return f"{index}. {self._meme_display_name(info)}"
 
+    def _load_meme_usage(self) -> dict[str, dict]:
+        try:
+            with open(self._meme_usage_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            logger.warning(f"读取表情调用统计失败: {e}")
+            return {}
+
+    def _normalize_meme_usage_data(self, data: dict) -> dict:
+        if "global" in data or "groups" in data:
+            global_usage = data.get("global") if isinstance(data.get("global"), dict) else {}
+            groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+            return {"global": global_usage, "groups": groups}
+        return {"global": data, "groups": {}}
+
+    def _usage_bucket(self, data: dict, scope: str, group_id: str = "") -> dict:
+        normalized = self._normalize_meme_usage_data(data)
+        if scope == "group" and group_id:
+            groups = normalized.setdefault("groups", {})
+            bucket = groups.get(group_id)
+            if not isinstance(bucket, dict):
+                bucket = {}
+                groups[group_id] = bucket
+            return bucket
+        bucket = normalized.setdefault("global", {})
+        return bucket if isinstance(bucket, dict) else {}
+
+    def _save_meme_usage(self, data: dict[str, dict]) -> None:
+        os.makedirs(os.path.dirname(self._meme_usage_path), exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix="meme_usage_", suffix=".json", dir=os.path.dirname(self._meme_usage_path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self._meme_usage_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    def _increment_usage_item(self, bucket: dict, key: str, info: dict, now: int) -> None:
+        item = bucket.get(key)
+        if not isinstance(item, dict):
+            item = {}
+        item["count"] = self._safe_int(item.get("count")) + 1
+        item["name"] = self._meme_display_name(info)
+        item["last_used"] = now
+        bucket[key] = item
+
+    async def _record_meme_usage(self, event: AstrMessageEvent, info: dict) -> None:
+        key = str(info.get("key") or "").strip()
+        if not key:
+            return
+        async with self._meme_usage_lock:
+            data = self._normalize_meme_usage_data(self._load_meme_usage())
+            now = int(time.time())
+            self._increment_usage_item(self._usage_bucket(data, "global"), key, info, now)
+            group_id = self._group_id(event)
+            if group_id:
+                self._increment_usage_item(self._usage_bucket(data, "group", group_id), key, info, now)
+            self._save_meme_usage(data)
+
+    def _meme_usage_display_name(self, key: str, scope: str = "global", group_id: str = "") -> str:
+        info = self.meme_infos.get(key) or {}
+        if info:
+            name = self._meme_display_name(info)
+            if name and name != key:
+                return name
+        item = self._usage_bucket(self._load_meme_usage(), scope, group_id).get(key)
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if name:
+                return name
+        return key
+
+    def _meme_usage_rows(self, limit: int | None = None, scope: str = "global", group_id: str = "") -> list[tuple[str, int]]:
+        data = self._load_meme_usage()
+        bucket = self._usage_bucket(data, scope, group_id)
+        rows = []
+        for key, item in bucket.items():
+            if isinstance(item, dict):
+                count = self._safe_int(item.get("count"))
+            else:
+                count = self._safe_int(item)
+            if count > 0:
+                rows.append((str(key), count))
+        rows.sort(key=lambda row: row[1], reverse=True)
+        return rows[:limit or self._get_meme_usage_stats_limit()]
+
+    def _format_meme_usage_text(self, rows: list[tuple[str, int]]) -> str:
+        total = sum(count for _, count in self._meme_usage_rows(10**9))
+        lines = [self._get_meme_usage_stats_title(), f"表情调用总次数：{total}"]
+        lines.extend(f"{index}. {self._meme_usage_display_name(key)}：{count} 次" for index, (key, count) in enumerate(rows, 1))
+        return "\n".join(lines)
+
+    def _font_supports_usage_text(self, font) -> bool:
+        try:
+            for char in "表情调用统计次数摸春日燕归来骑马":
+                mask = font.getmask(char)
+                if not mask.getbbox() or mask.size[0] <= 6:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _usage_font_priority(self, filename: str) -> int:
+        lower = filename.lower()
+        if any(value in lower for value in ("serif", "song", "simsun", "ming", "kaiti", "fangsong")):
+            return 100
+        groups = [
+            ("yahei", "msyh"),
+            ("deng",),
+            ("simhei", "heiti", "hei"),
+            ("noto", "sans"),
+            ("sourcehan", "sans"),
+            ("wqy",),
+            ("pingfang",),
+            ("hiragino", "sans"),
+            ("gothic",),
+            ("sans",),
+        ]
+        for index, group in enumerate(groups):
+            if all(value in lower for value in group):
+                return index
+        return 50
+
+    def _load_usage_font(self, size: int):
+        if ImageFont is None:
+            return None
+        font_dirs = []
+        if platform.system() == "Windows":
+            windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or "C:/Windows"
+            font_dirs.append(os.path.join(windir, "Fonts"))
+        else:
+            font_dirs.extend([
+                "/usr/share/fonts",
+                "/usr/local/share/fonts",
+                os.path.expanduser("~/.local/share/fonts"),
+                "/System/Library/Fonts",
+                "/Library/Fonts",
+            ])
+        candidates = []
+        for font_dir in font_dirs:
+            if not os.path.isdir(font_dir):
+                continue
+            for root, _, files in os.walk(font_dir):
+                for name in files:
+                    lower = name.lower()
+                    if lower.endswith((".ttf", ".ttc", ".otf")):
+                        path = os.path.join(root, name)
+                        candidates.append((self._usage_font_priority(name), path))
+        for priority, path in sorted(candidates, key=lambda item: item[0]):
+            if priority >= 100:
+                continue
+            try:
+                font = ImageFont.truetype(path, size)
+                if self._font_supports_usage_text(font):
+                    return font
+            except Exception:
+                continue
+        for _, path in sorted(candidates, key=lambda item: item[0]):
+            try:
+                font = ImageFont.truetype(path, size)
+                if self._font_supports_usage_text(font):
+                    return font
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    def _draw_usage_text(self, draw, xy: tuple[int, int], text: str, font, fill: str, max_width: int | None = None) -> None:
+        if not max_width:
+            draw.text(xy, text, font=font, fill=fill)
+            return
+        value = text
+        while value and draw.textbbox(xy, value, font=font)[2] - xy[0] > max_width:
+            value = value[:-1]
+        draw.text(xy, f"{value}…" if value != text else value, font=font, fill=fill)
+
+    def _text_size(self, draw, text: str, font) -> tuple[int, int]:
+        box = draw.textbbox((0, 0), text, font=font)
+        return box[2] - box[0], box[3] - box[1]
+
+    def _draw_centered_text(self, draw, box: tuple[int, int, int, int], text: str, font, fill: str) -> None:
+        text_box = draw.textbbox((0, 0), text, font=font)
+        text_w = text_box[2] - text_box[0]
+        text_h = text_box[3] - text_box[1]
+        x1, y1, x2, y2 = box
+        x = x1 + (x2 - x1 - text_w) / 2 - text_box[0]
+        y = y1 + (y2 - y1 - text_h) / 2 - text_box[1]
+        draw.text((x, y), text, font=font, fill=fill)
+
+    def _vertical_gradient(self, width: int, height: int, top: tuple[int, int, int], bottom: tuple[int, int, int]):
+        image = Image.new("RGB", (width, height), top)
+        pixels = image.load()
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            color = tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3))
+            for x in range(width):
+                pixels[x, y] = color
+        return image
+
+    def _draw_soft_circle(self, image, center: tuple[int, int], radius: int, color: tuple[int, int, int, int]) -> None:
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        cx, cy = center
+        for step in range(radius, 0, -8):
+            alpha = int(color[3] * (1 - step / radius) ** 2)
+            draw.ellipse((cx - step, cy - step, cx + step, cy + step), fill=(*color[:3], alpha))
+        image.alpha_composite(overlay)
+
+    def _render_meme_usage_stats(self, rows: list[tuple[str, int]], scope: str = "global", group_id: str = "") -> tuple[bytes, str]:
+        if Image is None or ImageDraw is None:
+            raise RuntimeError("Pillow 不可用")
+        scale = 2
+        columns = 4
+        card_w, card_h = 250 * scale, 82 * scale
+        gap_x, gap_y = 22 * scale, 20 * scale
+        margin_x, top_h, bottom = 58 * scale, 178 * scale, 58 * scale
+        shown_rows = rows[:self._get_meme_usage_stats_limit()]
+        row_count = max(1, (len(shown_rows) + columns - 1) // columns)
+        width = margin_x * 2 + columns * card_w + (columns - 1) * gap_x
+        height = top_h + row_count * card_h + (row_count - 1) * gap_y + bottom
+        image = self._vertical_gradient(width, height, (248, 251, 255), (239, 245, 252)).convert("RGBA")
+        self._draw_soft_circle(image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70))
+        self._draw_soft_circle(image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62))
+        self._draw_soft_circle(image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52))
+        draw = ImageDraw.Draw(image)
+        title_font = self._load_usage_font(42 * scale)
+        subtitle_font = self._load_usage_font(20 * scale)
+        name_font = self._load_usage_font(21 * scale)
+        rank_font = self._load_usage_font(14 * scale)
+        count_font = self._load_usage_font(17 * scale)
+        title = self._get_meme_usage_stats_title()
+        title_box = draw.textbbox((0, 0), title, font=title_font)
+        draw.text(((width - (title_box[2] - title_box[0])) // 2, 42 * scale), title, font=title_font, fill="#14213d")
+        total = sum(count for _, count in self._meme_usage_rows(10**9, scope, group_id))
+        subtitle = f"表情调用总次数 · {total}"
+        subtitle_w, _ = self._text_size(draw, subtitle, subtitle_font)
+        pill_box = ((width - subtitle_w - 52 * scale) // 2, 103 * scale, (width + subtitle_w + 52 * scale) // 2, 143 * scale)
+        draw.rounded_rectangle(pill_box, radius=20 * scale, fill=(255, 255, 255, 178), outline=(255, 255, 255, 230), width=scale)
+        self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
+        max_count = max((count for _, count in shown_rows), default=1)
+        for index, (key, count) in enumerate(shown_rows):
+            row, col = divmod(index, columns)
+            x = margin_x + col * (card_w + gap_x)
+            y = top_h + row * (card_h + gap_y)
+            shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            shadow_draw = ImageDraw.Draw(shadow)
+            shadow_draw.rounded_rectangle((x + 3 * scale, y + 5 * scale, x + card_w + 3 * scale, y + card_h + 5 * scale), radius=20 * scale, fill=(48, 72, 102, 22))
+            image.alpha_composite(shadow)
+            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=20 * scale, fill=(255, 255, 255, 218), outline=(255, 255, 255, 245), width=scale)
+            accent_h = max(18 * scale, int((card_h - 26 * scale) * count / max_count))
+            draw.rounded_rectangle((x + 14 * scale, y + card_h - 13 * scale - accent_h, x + 19 * scale, y + card_h - 13 * scale), radius=3 * scale, fill="#5b8def")
+            rank = f"#{index + 1}"
+            draw.text((x + 30 * scale, y + 16 * scale), rank, font=rank_font, fill="#9aa9b8")
+            self._draw_usage_text(draw, (x + 30 * scale, y + 40 * scale), self._meme_usage_display_name(key, scope, group_id), name_font, "#1f2d3d", card_w - 112 * scale)
+            count_text = f"{count} 次"
+            count_box = draw.textbbox((0, 0), count_text, font=count_font)
+            count_w = count_box[2] - count_box[0]
+            badge_x = x + card_w - count_w - 34 * scale
+            badge_box = (badge_x, y + 26 * scale, x + card_w - 18 * scale, y + 58 * scale)
+            draw.rounded_rectangle(badge_box, radius=16 * scale, fill="#eef5ff")
+            self._draw_centered_text(draw, badge_box, count_text, count_font, "#3f78c8")
+        output = io.BytesIO()
+        image.convert("RGB").save(output, format="PNG")
+        return output.getvalue(), "image/png"
+
     def _get_message_args(self, event: AstrMessageEvent, command_name: str) -> str:
         message = self._extract_message_text(event)
         if not message:
             return ""
+
+        # 优先处理带有空格的情况，支持 "小祥 meme搜索 举牌" 或 "catmeme搜索 举牌"
         parts = message.split(maxsplit=1)
-        if parts and parts[0].lstrip("#/％%") == command_name:
-            return parts[1] if len(parts) > 1 else ""
+        if parts:
+            p0 = parts[0].lstrip("#/％%")
+            if p0 == command_name or p0.endswith(command_name):
+                return parts[1] if len(parts) > 1 else ""
+
+        # 处理没有空格的情况，或者上述匹配失败的情况，如 "catmeme搜索举牌"
+        idx = message.find(command_name)
+        if idx != -1:
+            # 找到指令位置，截取之后的部分作为参数
+            return message[idx + len(command_name):].strip()
+
         return ""
 
     def _set_direction_option(self, options: dict[str, object], direction: str) -> None:
@@ -1899,6 +2197,38 @@ class MemeUpdater(Star):
         except Exception as e:
             yield event.plain_result(f"刷新失败：{e}")
 
+    @filter.command("表情统计")
+    async def meme_usage_stats(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        group_id = self._group_id(event)
+        scope = "group" if group_id else "global"
+        rows = self._meme_usage_rows(scope=scope, group_id=group_id)
+        if not rows:
+            yield event.plain_result("当前群组暂无表情调用统计。" if group_id else "暂无表情调用统计。")
+            return
+        try:
+            await self._refresh_meme_infos()
+            image, content_type = self._render_meme_usage_stats(rows, scope=scope, group_id=group_id)
+            yield event.chain_result([self._image_component(image, content_type)])
+        except Exception as e:
+            logger.warning(f"生成表情调用统计图失败: {e}")
+            yield event.plain_result(self._format_meme_usage_text(rows))
+
+    @filter.command("总表情统计")
+    async def meme_global_usage_stats(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        rows = self._meme_usage_rows(scope="global")
+        if not rows:
+            yield event.plain_result("暂无表情调用统计。")
+            return
+        try:
+            await self._refresh_meme_infos()
+            image, content_type = self._render_meme_usage_stats(rows, scope="global")
+            yield event.chain_result([self._image_component(image, content_type)])
+        except Exception as e:
+            logger.warning(f"生成总表情调用统计图失败: {e}")
+            yield event.plain_result(self._format_meme_usage_text(rows))
+
     @filter.command("meme搜索")
     async def meme_search(self, event: AstrMessageEvent):
         self._stop_event(event)
@@ -2003,6 +2333,7 @@ class MemeUpdater(Star):
                 yield event.plain_result(f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。")
                 return
             image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
+            await self._record_meme_usage(event, info)
             async for result in self._yield_and_stop(event, event.chain_result([self._image_component(image, content_type)])):
                 yield result
         except ArgSyntaxError as e:
@@ -2035,6 +2366,7 @@ class MemeUpdater(Star):
                         await self._fill_default_avatar_images(event, render_images, render_user_infos, params["min_images"])
                     render_texts = [str(v) for v in params["default_texts"]] if auto_use else texts
                     image, content_type = await self._render_meme(str(info.get("key")), render_images, render_texts, render_user_infos, options)
+                    await self._record_meme_usage(event, info)
                     keywords = _format_keywords([str(v) for v in info.get("keywords", [])])
                     async for result in self._yield_and_stop(event, event.chain_result([
                         Comp.Plain(f"关键词：{keywords}\n"),
@@ -2120,6 +2452,7 @@ class MemeUpdater(Star):
                     continue
 
                 image, content_type = await self._render_meme(key, images, texts, user_infos, options)
+                await self._record_meme_usage(event, info)
                 yield event.chain_result([self._image_component(image, content_type)])
                 self._stop_event(event)
                 return
