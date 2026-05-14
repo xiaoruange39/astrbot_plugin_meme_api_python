@@ -224,9 +224,10 @@ class MemeRepoManager:
             meaningful_status_lines = self._meaningful_status_lines(status_output)
             local_dirty = bool(meaningful_status_lines)
             if local_dirty:
+                status_preview = "\n".join(meaningful_status_lines)[:300]
                 lines.extend([
                     f"⚠️ [{index}/{total}] {owner_repo} 检测到本地文件变更，准备恢复到远端版本",
-                    f"    {'\n'.join(meaningful_status_lines)[:300]}",
+                    f"    {status_preview}",
                 ])
 
             if local_commit == remote_commit and not local_dirty:
