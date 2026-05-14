@@ -44,13 +44,13 @@ class MemeUsageStats:
         context.register_web_api(
             f"/{plugin_id}/reset",
             self.web_reset_stats,
-            ["GET"],
+            ["POST"],
             "清空表情统计数据",
         )
         context.register_web_api(
             f"/{plugin_id}/delete",
             self.web_delete_stats,
-            ["GET"],
+            ["POST", "DELETE"],
             "删除特定表情统计记录",
         )
         context.register_web_api(
@@ -119,10 +119,30 @@ class MemeUsageStats:
             logger.error(f"Plugin Page 获取统计失败: {e}")
             return jsonify({"global": {}, "groups": {}, "error": str(e)})
 
+    async def _mutation_params(self) -> dict:
+        payload = {}
+        if request.is_json:
+            data = await request.get_json(silent=True)
+            if isinstance(data, dict):
+                payload.update(data)
+        payload.update(request.args)
+        try:
+            form = await request.form
+            payload.update(form)
+        except Exception:
+            pass
+        return payload
+
+    def _confirmed(self, params: dict) -> bool:
+        return str(params.get("confirm", "")).lower() in {"1", "true", "yes"}
+
     async def web_reset_stats(self):
+        params = await self._mutation_params()
+        if not self._confirmed(params):
+            return json.dumps({"success": False, "message": "请提供 confirm=true 确认清空统计数据"}, ensure_ascii=False), 400, JSON_HEADERS
         async with self.lock:
             self.save({"global": {}, "groups": {}, "group_names": {}})
-        return json.dumps({"success": True, "message": "统计数据已清空"}), 200, JSON_HEADERS
+        return json.dumps({"success": True, "message": "统计数据已清空"}, ensure_ascii=False), 200, JSON_HEADERS
 
     async def web_get_group_name(self):
         try:
@@ -143,7 +163,9 @@ class MemeUsageStats:
 
     async def web_delete_stats(self):
         try:
-            args = request.args
+            args = await self._mutation_params()
+            if not self._confirmed(args):
+                return json.dumps({"success": False, "message": "请提供 confirm=true 确认删除统计数据"}, ensure_ascii=False), 400, JSON_HEADERS
             key = args.get("key", "")
             scope = args.get("scope", "global")
             group_id = args.get("group_id", "")
@@ -227,8 +249,8 @@ class MemeUsageStats:
         rows.sort(key=lambda row: row[1], reverse=True)
         return rows[:limit or self.limit()]
 
-    def format_text(self, rows: list[tuple[str, int]]) -> str:
-        total = sum(count for _, count in self.rows(10**9))
+    def format_text(self, rows: list[tuple[str, int]], scope: str = "global", group_id: str = "") -> str:
+        total = sum(count for _, count in self.rows(10**9, scope, group_id))
         lines = [self.title(), f"表情调用总次数：{total}"]
-        lines.extend(f"{index}. {self.display_name(key)}：{count} 次" for index, (key, count) in enumerate(rows, 1))
+        lines.extend(f"{index}. {self.display_name(key, scope, group_id)}：{count} 次" for index, (key, count) in enumerate(rows, 1))
         return "\n".join(lines)
