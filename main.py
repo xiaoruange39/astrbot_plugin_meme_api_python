@@ -10,6 +10,7 @@ import time
 import ipaddress
 import mimetypes
 import platform
+import threading
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
@@ -116,6 +117,7 @@ class MemeUpdater(Star):
         self._meme_info_refresh_task: asyncio.Task | None = None
         self._usage_font_candidates: list[tuple[int, str]] | None = None
         self._usage_font_cache = {}
+        self._usage_font_lock = threading.Lock()
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
         self._last_temp_cleanup = 0.0
         self.plugin_config = MemePluginConfig(config, self._meme_data_dir)
@@ -363,38 +365,40 @@ class MemeUpdater(Star):
         return 50
 
     def _usage_font_candidates_sorted(self) -> list[tuple[int, str]]:
-        if self._usage_font_candidates is not None:
+        with self._usage_font_lock:
+            if self._usage_font_candidates is not None:
+                return self._usage_font_candidates
+            font_dirs = []
+            if platform.system() == "Windows":
+                windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or "C:/Windows"
+                font_dirs.append(os.path.join(windir, "Fonts"))
+            else:
+                font_dirs.extend([
+                    "/usr/share/fonts",
+                    "/usr/local/share/fonts",
+                    os.path.expanduser("~/.local/share/fonts"),
+                    "/System/Library/Fonts",
+                    "/Library/Fonts",
+                ])
+            candidates = []
+            for font_dir in font_dirs:
+                if not os.path.isdir(font_dir):
+                    continue
+                for root, _, files in os.walk(font_dir):
+                    for name in files:
+                        lower = name.lower()
+                        if lower.endswith((".ttf", ".ttc", ".otf")):
+                            candidates.append((self._usage_font_priority(name), os.path.join(root, name)))
+            self._usage_font_candidates = sorted(candidates, key=lambda item: item[0])
             return self._usage_font_candidates
-        font_dirs = []
-        if platform.system() == "Windows":
-            windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or "C:/Windows"
-            font_dirs.append(os.path.join(windir, "Fonts"))
-        else:
-            font_dirs.extend([
-                "/usr/share/fonts",
-                "/usr/local/share/fonts",
-                os.path.expanduser("~/.local/share/fonts"),
-                "/System/Library/Fonts",
-                "/Library/Fonts",
-            ])
-        candidates = []
-        for font_dir in font_dirs:
-            if not os.path.isdir(font_dir):
-                continue
-            for root, _, files in os.walk(font_dir):
-                for name in files:
-                    lower = name.lower()
-                    if lower.endswith((".ttf", ".ttc", ".otf")):
-                        candidates.append((self._usage_font_priority(name), os.path.join(root, name)))
-        self._usage_font_candidates = sorted(candidates, key=lambda item: item[0])
-        return self._usage_font_candidates
 
     def _load_usage_font(self, size: int):
         if ImageFont is None:
             return None
-        cached_font = self._usage_font_cache.get(size)
-        if cached_font is not None:
-            return cached_font
+        with self._usage_font_lock:
+            cached_font = self._usage_font_cache.get(size)
+            if cached_font is not None:
+                return cached_font
         candidates = self._usage_font_candidates_sorted()
         for priority, path in candidates:
             if priority >= 100:
@@ -402,7 +406,8 @@ class MemeUpdater(Star):
             try:
                 font = ImageFont.truetype(path, size)
                 if self._font_supports_usage_text(font):
-                    self._usage_font_cache[size] = font
+                    with self._usage_font_lock:
+                        self._usage_font_cache[size] = font
                     return font
             except Exception:
                 continue
@@ -410,12 +415,14 @@ class MemeUpdater(Star):
             try:
                 font = ImageFont.truetype(path, size)
                 if self._font_supports_usage_text(font):
-                    self._usage_font_cache[size] = font
+                    with self._usage_font_lock:
+                        self._usage_font_cache[size] = font
                     return font
             except Exception:
                 continue
         font = ImageFont.load_default()
-        self._usage_font_cache[size] = font
+        with self._usage_font_lock:
+            self._usage_font_cache[size] = font
         return font
 
     def _draw_usage_text(self, draw, xy: tuple[int, int], text: str, font, fill: str, max_width: int | None = None) -> None:
@@ -441,14 +448,12 @@ class MemeUpdater(Star):
         draw.text((x, y), text, font=font, fill=fill)
 
     def _vertical_gradient(self, width: int, height: int, top: tuple[int, int, int], bottom: tuple[int, int, int]):
-        image = Image.new("RGB", (width, height), top)
-        pixels = image.load()
-        for y in range(height):
-            ratio = y / max(1, height - 1)
-            color = tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3))
-            for x in range(width):
-                pixels[x, y] = color
-        return image
+        if height <= 1:
+            return Image.new("RGB", (width, height), top)
+        rows = [tuple(int(top[i] * (1 - y / (height - 1)) + bottom[i] * (y / (height - 1))) for i in range(3)) for y in range(height)]
+        image = Image.new("RGB", (1, height))
+        image.putdata(rows)
+        return image.resize((width, height))
 
     def _draw_soft_circle(self, image, center: tuple[int, int], radius: int, color: tuple[int, int, int, int]) -> None:
         overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
@@ -1619,12 +1624,13 @@ class MemeUpdater(Star):
                 lines.append(f"文字数量：{_format_range(params['min_texts'], params['max_texts'])}")
                 if params["default_texts"]:
                     lines.append(f"默认文字：{_format_keywords([str(v) for v in params['default_texts']])}")
-            yield event.plain_result("\n".join(lines))
+            components = [Comp.Plain("\n".join(lines))]
             try:
                 image, content_type = await self.meme_client.get_preview(str(info.get("key")))
-                yield event.chain_result([self._image_component(image, content_type)])
+                components.extend([Comp.Plain("\n"), self._image_component(image, content_type)])
             except Exception as e:
-                logger.debug(f"获取表情预览失败 {info.get('key')}: {e}")
+                logger.warning(f"获取表情预览失败 {info.get('key')}: {e}")
+            yield event.chain_result(components)
         except Exception as e:
             yield event.plain_result(f"获取表情详情失败：{e}")
 

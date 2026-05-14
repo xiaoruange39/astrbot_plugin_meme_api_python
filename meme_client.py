@@ -104,8 +104,11 @@ class MemeApiClient:
                 try:
                     async with session.get(f"{self._base_url_getter()}{path}", timeout=timeout) as resp:
                         data = await self._read_limited_response(resp)
-                        content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
+                        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
                         if resp.status < 400:
+                            if not content_type.startswith("image/"):
+                                text = data.decode("utf-8", errors="replace")[:300]
+                                raise RuntimeError(f"meme API 返回非图片内容：{content_type or '未知类型'}，响应片段：{text}")
                             return data, content_type
                         last_error = data.decode("utf-8", errors="replace")[:300]
                 except Exception as e:
