@@ -57,7 +57,7 @@ class MemeUsageStats:
             f"/{plugin_id}/group-name",
             self.web_get_group_name,
             ["GET"],
-            "获取群组名称",
+            "获取缓存群组名称",
         )
 
     def limit(self) -> int:
@@ -210,14 +210,16 @@ class MemeUsageStats:
         key = str(info.get("key") or "").strip()
         if not key:
             return
+        group_id = self._group_id(event)
+        group_name = ""
+        if group_id:
+            group_name = self._group_name_from_event(event, group_id) or await self._lookup_group_name(event, group_id)
         async with self.lock:
             data = self.normalize(self.load())
             now = int(time.time())
             self.increment_item(self.bucket(data, "global"), key, info, now)
-            group_id = self._group_id(event)
             if group_id:
                 self.increment_item(self.bucket(data, "group", group_id), key, info, now)
-                group_name = self._group_name_from_event(event, group_id) or await self._lookup_group_name(event, group_id)
                 if group_name:
                     data.setdefault("group_names", {})[group_id] = group_name
             self.save(data)

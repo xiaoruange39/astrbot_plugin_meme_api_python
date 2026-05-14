@@ -145,6 +145,15 @@ class MemeRepoManager:
     def _format_commit_short(self, commit_info: str) -> str:
         return (commit_info or "").split()[0][:8] if commit_info else "unknown"
 
+    def _meaningful_status_lines(self, status_output: str) -> list[str]:
+        lines = []
+        for line in status_output.splitlines():
+            path = line[3:].strip().strip('"') if len(line) > 3 else line.strip().strip('"')
+            if path.endswith(".pyc") or "/__pycache__/" in path or path.endswith("/__pycache__/"):
+                continue
+            lines.append(line)
+        return lines
+
     def _get_owner_repo(self, url: str) -> str:
         path = urlparse(url).path.strip("/")
         path = path.removesuffix(".git")
@@ -206,26 +215,32 @@ class MemeRepoManager:
             local_short = self._format_commit_short(local_commit)
             remote_short = self._format_commit_short(remote_commit)
 
-            if local_commit == remote_commit:
-                lines.append(f"✅ [{index}/{total}] {owner_repo} 无更新 ({local_short})")
-                return {"status": "success", "updated": False, "lines": lines}
-
             status_cmd = ["git", "status", "--porcelain"]
             ret, status_output = await self._run_repo_cmd(status_cmd, cwd=repo_clone_path, remote=remote_mode)
             if ret != 0:
                 lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法检查本地修改", f"    {status_output[:300]}"])
                 return {"status": "failed", "updated": False, "lines": lines}
-            if status_output.strip():
-                lines.extend([f"⚠️ [{index}/{total}] {owner_repo} 存在本地修改，已跳过覆盖更新", f"    {status_output[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
+
+            meaningful_status_lines = self._meaningful_status_lines(status_output)
+            local_dirty = bool(meaningful_status_lines)
+            if local_dirty:
+                lines.extend([
+                    f"⚠️ [{index}/{total}] {owner_repo} 检测到本地文件变更，准备恢复到远端版本",
+                    f"    {'\n'.join(meaningful_status_lines)[:300]}",
+                ])
+
+            if local_commit == remote_commit and not local_dirty:
+                lines.append(f"✅ [{index}/{total}] {owner_repo} 无更新 ({local_short})")
+                return {"status": "success", "updated": False, "lines": lines}
 
             reset_cmd = ["git", "reset", "--hard", f"origin/{branch}"]
             ret, output = await self._run_repo_cmd(reset_cmd, cwd=repo_clone_path, remote=remote_mode)
             if ret == 0:
                 after_count = await self._count_remote_data_items(repo_data_path) if remote_mode else self._count_data_items(repo_data_path)
                 added = max(after_count - before_count, 0)
+                action = "本地恢复完成" if local_commit == remote_commit else "更新完成"
                 lines.extend([
-                    f"✅ [{index}/{total}] {owner_repo} 更新完成 ({local_short} → {remote_short})",
+                    f"✅ [{index}/{total}] {owner_repo} {action} ({local_short} → {remote_short})",
                     f"    📁 新增 {added} 个 | {repo_data_path}",
                 ])
                 return {"status": "success", "updated": True, "lines": lines}
