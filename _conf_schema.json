@@ -110,9 +110,9 @@
   },
   "local_workdir": {
     "description": "本机工作目录",
-    "hint": "本机 memeapi 根目录。未启用远程服务器时，仓库会更新到这里；应与 memeapi 容器挂载读取的目录一致。",
+    "hint": "本机 memeapi 根目录。留空则使用 AstrBot 插件数据目录；本机 Docker 读取其他挂载目录时再填写。",
     "type": "string",
-    "default": "/root/memeapi"
+    "default": ""
   },
   "repo_list": {
     "description": "表情包仓库列表",

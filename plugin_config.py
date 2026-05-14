@@ -3,6 +3,8 @@ import re
 import posixpath
 from urllib.parse import urlparse
 
+from astrbot.api import logger
+
 SCREEN_SESSION = "meme-generator"
 DEFAULT_MEME_WORKDIR = "/root/memeapi"
 
@@ -101,13 +103,16 @@ class MemePluginConfig:
         except ValueError:
             return None
         if rel_data == "." or rel_data.startswith("..") or os.path.isabs(rel_data):
+            logger.warning(f"表情包数据目录不在工作目录内，已跳过: {data_dir} | 工作目录: {base_dir}")
             return None
         rel_data = rel_data.replace("\\", "/")
         if not is_safe_relative_path(rel_data):
+            logger.warning(f"表情包数据目录不合法，已跳过: {data_dir}")
             return None
         clone_subdir = os.path.dirname(rel_data).replace("\\", "/")
         data_leaf = os.path.basename(rel_data)
         if not clone_subdir or not data_leaf:
+            logger.warning(f"表情包数据目录缺少仓库目录或数据目录，已跳过: {data_dir}")
             return None
         return clone_subdir, data_leaf, os.path.join(normalized_base, clone_subdir)
 
@@ -126,11 +131,11 @@ class MemePluginConfig:
             if not url or has_shell_control_chars(url) or not is_allowed_repo_url(url):
                 continue
             data_dir = str(repo.get("data_dir") or "").strip()
-            if data_dir:
-                data_dir = os.path.join(base_dir, data_dir.lstrip("/\\")) if os.path.isabs(data_dir) and not os.path.normpath(data_dir).startswith(os.path.normpath(base_dir)) else data_dir
             paths = self._repo_paths_from_data_dir(data_dir, base_dir) if data_dir else None
             if paths:
                 data_subdir, data_leaf, clone_dir = paths
+            elif data_dir:
+                continue
             else:
                 data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
                 if not is_safe_relative_path(data_subdir):
@@ -178,7 +183,9 @@ class MemePluginConfig:
         return str(self.config.get("remote_key_path", "")).strip()
 
     def local_workdir(self) -> str:
-        workdir = str(self.config.get("local_workdir", DEFAULT_MEME_WORKDIR)).strip() or DEFAULT_MEME_WORKDIR
+        workdir = str(self.config.get("local_workdir", "")).strip()
+        if not workdir:
+            return self.meme_data_dir
         return self.meme_data_dir if has_shell_control_chars(workdir) else workdir
 
     def remote_workdir(self) -> str:
