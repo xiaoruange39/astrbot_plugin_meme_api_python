@@ -21,7 +21,7 @@
     "description": "表情信息加载并发数",
     "hint": "启动或刷新表情信息时并发请求详情的数量。",
     "type": "int",
-    "default": 8
+    "default": 4
   },
   "meme_refresh_verbose_log": {
     "description": "显示详细刷新日志",
@@ -101,6 +101,12 @@
     "hint": "开启后最新的创建/更新时间排在前面；名称和关键词则按倒序排列。",
     "type": "bool",
     "default": true
+  },
+  "repo_update_enabled": {
+    "description": "启用更新表情包功能",
+    "hint": "默认关闭。开启后才允许使用 更新表情包 命令拉取仓库、重启容器并刷新表情信息。",
+    "type": "bool",
+    "default": false
   },
   "repo_list": {
     "description": "表情包仓库列表",

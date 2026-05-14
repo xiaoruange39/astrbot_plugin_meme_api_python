@@ -190,6 +190,11 @@
       let pendingAction = null;
 
       function unwrap(response) { return response && response.data ? response.data : response; }
+      async function apiPost(path, params = {}) {
+        if (bridge.apiPost) return bridge.apiPost(path, params);
+        if (bridge.apiRequest) return bridge.apiRequest(path, { method: 'POST', data: params });
+        throw new Error('AstrBotPluginPage bridge 不支持 POST 请求');
+      }
       function bucketTotal(bucket) { return Object.values(bucket || {}).reduce((sum, item) => sum + (Number(item.count) || 0), 0); }
       function entries(bucket) { return Object.entries(bucket || {}).sort((a, b) => (Number(b[1].count) || 0) - (Number(a[1].count) || 0)); }
       function groupName(id) { return (stats.group_names && stats.group_names[id]) || `群 ${id}`; }
@@ -299,14 +304,14 @@
         `;
         document.getElementById('deleteScope').onclick = () => {
           showModal('删除统计', `确定要删除 ${selectedTitle()} 的全部统计数据吗？`, async () => {
-            await bridge.apiGet('delete', { scope: selected === 'global' ? 'global' : 'group', group_id: selected, all: '1' });
+            await apiPost('delete', { scope: selected === 'global' ? 'global' : 'group', group_id: selected, all: '1', confirm: 'true' });
             if (selected !== 'global') selected = 'global';
             await fetchStats();
           });
         };
         detailEl.querySelectorAll('.delete-one').forEach(btn => {
           btn.onclick = () => showModal('删除统计', `确定要删除表情 [${btn.dataset.key}] 的统计记录吗？`, async () => {
-            await bridge.apiGet('delete', { key: btn.dataset.key, scope: selected === 'global' ? 'global' : 'group', group_id: selected });
+            await apiPost('delete', { key: btn.dataset.key, scope: selected === 'global' ? 'global' : 'group', group_id: selected, confirm: 'true' });
             await fetchStats();
           });
         });
@@ -355,7 +360,7 @@
 
       document.getElementById('refresh').onclick = fetchStats;
       document.getElementById('reset').onclick = () => showModal('清空全部统计', '确定要清空所有表情调用统计吗？此操作无法撤销。', async () => {
-        await bridge.apiGet('reset');
+        await apiPost('reset', { confirm: 'true' });
         selected = 'global';
         await fetchStats();
       });

@@ -1,7 +1,5 @@
 import os
 import re
-import json
-import shlex
 import base64
 import random
 import socket
@@ -12,7 +10,6 @@ import time
 import ipaddress
 import mimetypes
 import platform
-import posixpath
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
@@ -25,53 +22,22 @@ from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 import astrbot.api.message_components as Comp
 from .usage_stats import MemeUsageStats
+from .meme_client import MemeApiClient
+from .plugin_config import MemePluginConfig
+from .repo_manager import MemeRepoManager
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:
     Image = ImageDraw = ImageFont = None
 
-SCREEN_SESSION = "meme-generator"
 TEMP_IMAGE_TTL_SECONDS = 3600
 TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS = 300
-COMMAND_TIMEOUT_SECONDS = 120
 MAX_IMAGE_DOWNLOAD_CONCURRENCY = 4
-MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
 SHORTCUT_INITIALIZE_WAIT_SECONDS = 10
+MEME_API_RESTART_REFRESH_ATTEMPTS = 6
+MEME_API_RESTART_REFRESH_INTERVAL_SECONDS = 5
 MIRAGETANK_KEY = "miragetank"
 PLUGIN_NAME = "meme_updater"
-
-DEFAULT_REPO_SPECS = [
-    {
-        "name": "meme_emoji",
-        "url": "https://github.com/anyliew/meme_emoji",
-        "data_subdir": "meme_emoji/emoji",
-    },
-    {
-        "name": "meme-generator-jj",
-        "url": "https://github.com/jinjiao007/meme-generator-jj",
-        "data_subdir": "meme-generator-jj/memes",
-    },
-    {
-        "name": "meme_emoji_nsfw",
-        "url": "https://github.com/anyliew/meme_emoji_nsfw",
-        "data_subdir": "meme_emoji_nsfw/emoji",
-    },
-    {
-        "name": "tudou-meme",
-        "url": "https://github.com/LRZ9712/tudou-meme",
-        "data_subdir": "tudou-meme/meme",
-    },
-    {
-        "name": "xiaoruan-meme",
-        "url": "https://github.com/xiaoruange39/xiaoruan-meme",
-        "data_subdir": "xiaoruan-meme/emoji",
-    },
-    {
-        "name": "meme-generator-contrib",
-        "url": "https://github.com/MemeCrafters/meme-generator-contrib",
-        "data_subdir": "meme-generator-contrib/memes",
-    },
-]
 
 QUOTE_PAIRS = {
     '"': '"',
@@ -82,44 +48,12 @@ QUOTE_PAIRS = {
 }
 
 
-def _normalize_remote_path(path: str) -> str:
-    return path.strip().replace("\\", "/")
-
-
 def _format_range(min_value: int, max_value: int) -> str:
     return str(min_value) if min_value == max_value else f"{min_value} ~ {max_value}"
 
 
 def _format_keywords(keywords: list[str]) -> str:
     return "、".join(f"“{keyword}”" for keyword in keywords)
-
-
-def _has_shell_control_chars(value: str) -> bool:
-    return any(ord(char) < 32 or char in ";&|`$<>\n\r" for char in value)
-
-
-def _is_safe_relative_path(path: str) -> bool:
-    parts = path.replace("\\", "/").split("/")
-    return bool(path) and not _has_shell_control_chars(path) and not os.path.isabs(path) and ".." not in parts
-
-
-def _is_safe_ssh_arg(value: str) -> bool:
-    return bool(value) and not value.startswith("-") and not _has_shell_control_chars(value)
-
-
-def _posix_join(base: str, *parts: str) -> str:
-    path = base
-    for part in parts:
-        normalized = str(part).replace("\\", "/").strip("/")
-        if normalized:
-            path = posixpath.join(path, normalized)
-    return path
-
-
-def _is_allowed_repo_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
-
 
 class ArgSyntaxError(SyntaxError):
     pass
@@ -171,7 +105,7 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.1.6")
+@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.1.7")
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -180,8 +114,19 @@ class MemeUpdater(Star):
         self._meme_shortcuts: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
         self._meme_info_refresh_task: asyncio.Task | None = None
+        self._usage_font_candidates: list[tuple[int, str]] | None = None
+        self._usage_font_cache = {}
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
         self._last_temp_cleanup = 0.0
+        self.plugin_config = MemePluginConfig(config, self._meme_data_dir)
+        self.repo_manager = MemeRepoManager(self.plugin_config, self._meme_data_dir)
+        self.meme_client = MemeApiClient(
+            self.plugin_config.meme_api_base_url,
+            self.plugin_config.meme_request_timeout,
+            self.plugin_config.max_image_bytes,
+            self.plugin_config.meme_info_concurrency,
+            self.plugin_config.meme_refresh_verbose_log,
+        )
         self.usage_stats = MemeUsageStats(
             config,
             str(StarTools.get_data_dir() / "meme_usage.json"),
@@ -210,149 +155,6 @@ class MemeUpdater(Star):
     def meme_shortcuts(self, value: list[dict]):
         self._meme_shortcuts = value
 
-    def _default_repos(self) -> list[dict]:
-        repos = []
-        for spec in DEFAULT_REPO_SPECS:
-            data_subdir = spec["data_subdir"]
-            data_dir = os.path.join(self._meme_data_dir, data_subdir)
-            repos.append({
-                "name": spec["name"],
-                "url": spec["url"],
-                "data_subdir": data_subdir,
-                "data_leaf": "",
-                "clone_dir": os.path.dirname(data_dir),
-                "data_dir": data_dir,
-            })
-        return repos
-
-    def _get_repos(self) -> list[dict]:
-        default_repos = self._default_repos()
-        repos = self.config.get("repo_list", default_repos)
-        if not isinstance(repos, list):
-            return default_repos
-
-        result = []
-        for repo in repos:
-            if not isinstance(repo, dict):
-                continue
-            url = str(repo.get("url", "")).strip()
-            data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
-            if not url or _has_shell_control_chars(url) or not _is_allowed_repo_url(url) or not _is_safe_relative_path(data_subdir):
-                continue
-            clone_dir = os.path.join(self._meme_data_dir, data_subdir)
-            data_leaf = str(repo.get("data_leaf", "")).strip()
-            if data_leaf and not _is_safe_relative_path(data_leaf):
-                continue
-            data_dir = os.path.join(clone_dir, data_leaf) if data_leaf else clone_dir
-            name = os.path.basename(clone_dir) or url.rstrip("/").split("/")[-1].removesuffix(".git")
-            result.append({
-                "name": name,
-                "url": url,
-                "data_subdir": data_subdir,
-                "data_leaf": data_leaf,
-                "clone_dir": clone_dir,
-                "data_dir": data_dir,
-            })
-        return result or default_repos
-
-    def _remote_repo_paths(self, repo: dict) -> tuple[str, str]:
-        remote_workdir = _normalize_remote_path(self._get_remote_workdir())
-        data_subdir = str(repo.get("data_subdir") or "").strip()
-        data_leaf = str(repo.get("data_leaf") or "").strip()
-        remote_clone_dir = _posix_join(remote_workdir, data_subdir)
-        remote_data_dir = _posix_join(remote_clone_dir, data_leaf) if data_leaf else remote_clone_dir
-        return remote_clone_dir, remote_data_dir
-
-    def _get_remote_enabled(self) -> bool:
-        return bool(self.config.get("remote_enabled", False))
-
-    def _get_remote_auth_mode(self) -> str:
-        mode = str(self.config.get("remote_auth_mode", "私钥登录")).strip()
-        return mode if mode in {"私钥登录", "密码登录"} else "私钥登录"
-
-    def _get_remote_host(self) -> str:
-        return str(self.config.get("remote_host", "")).strip()
-
-    def _get_remote_user(self) -> str:
-        return str(self.config.get("remote_user", "")).strip()
-
-    def _get_remote_port(self) -> int:
-        try:
-            return int(self.config.get("remote_port", 22))
-        except (TypeError, ValueError):
-            return 22
-
-    def _get_remote_password(self) -> str:
-        return str(self.config.get("remote_password", "")).strip()
-
-    def _get_remote_key_path(self) -> str:
-        return str(self.config.get("remote_key_path", "")).strip()
-
-    def _get_remote_workdir(self) -> str:
-        workdir = str(self.config.get("remote_workdir", self._meme_data_dir)).strip() or self._meme_data_dir
-        return self._meme_data_dir if _has_shell_control_chars(workdir) else workdir
-
-    def _get_docker_container(self) -> str:
-        container = str(self.config.get("docker_container", SCREEN_SESSION)).strip() or SCREEN_SESSION
-        return SCREEN_SESSION if _has_shell_control_chars(container) else container
-
-    def _get_meme_api_base_url(self) -> str:
-        value = str(self.config.get("meme_api_base_url", "http://127.0.0.1:2233")).strip().rstrip("/")
-        parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return "http://127.0.0.1:2233"
-        return value
-
-    def _get_meme_request_timeout(self) -> int:
-        try:
-            return max(1, int(self.config.get("meme_request_timeout", 30)))
-        except (TypeError, ValueError):
-            return 30
-
-    def _get_max_image_bytes(self) -> int:
-        try:
-            mb = int(self.config.get("meme_max_image_mb", 10))
-            return max(1, mb) * 1024 * 1024
-        except (TypeError, ValueError):
-            return 10 * 1024 * 1024
-
-    def _get_meme_info_concurrency(self) -> int:
-        try:
-            return max(1, int(self.config.get("meme_info_concurrency", 8)))
-        except (TypeError, ValueError):
-            return 8
-
-    def _get_repo_update_concurrency(self) -> int:
-        try:
-            return max(1, int(self.config.get("repo_update_concurrency", 2)))
-        except (TypeError, ValueError):
-            return 2
-
-    def _get_meme_shortcut_enabled(self) -> bool:
-        return bool(self.config.get("meme_shortcut_enabled", True))
-
-    def _get_meme_poke_random_enabled(self) -> bool:
-        return bool(self.config.get("meme_poke_random_enabled", False))
-
-    def _get_meme_auto_default_texts(self) -> bool:
-        return bool(self.config.get("meme_auto_default_texts", True))
-
-    def _get_meme_auto_sender_avatar(self) -> bool:
-        return bool(self.config.get("meme_auto_sender_avatar", True))
-
-    def _get_meme_refresh_verbose_log(self) -> bool:
-        return bool(self.config.get("meme_refresh_verbose_log", False))
-
-    def _get_disabled_meme_names(self) -> set[str]:
-        value = self.config.get("meme_disabled_keys", [])
-        if isinstance(value, str):
-            items = re.split(r"[\s,，]+", value)
-        elif isinstance(value, list):
-            items = value
-        else:
-            items = []
-        return {str(item).strip() for item in items if str(item).strip()}
-
     def _is_meme_disabled(self, key: str, info: dict, disabled_names: set[str]) -> bool:
         if not disabled_names:
             return False
@@ -360,456 +162,41 @@ class MemeUpdater(Star):
             return True
         return any(str(keyword).strip() in disabled_names for keyword in info.get("keywords", []))
 
-    def _get_meme_search_limit(self) -> int:
-        try:
-            return max(1, int(self.config.get("meme_search_limit", 30)))
-        except (TypeError, ValueError):
-            return 30
-
-    def _get_meme_search_forward_enabled(self) -> bool:
-        return bool(self.config.get("meme_search_forward_enabled", True))
-
-    def _get_meme_list_text_template(self) -> str:
-        return str(self.config.get("meme_list_text_template", "{index}. {keywords}")).strip() or "{index}. {keywords}"
-
-    def _get_meme_list_sort_by(self) -> str:
-        sort_by = str(self.config.get("meme_list_sort_by", "创建时间")).strip()
-        return sort_by if sort_by in {"名称", "关键词", "创建时间", "更新时间"} else "创建时间"
-
-    def _get_meme_list_sort_reverse(self) -> bool:
-        return bool(self.config.get("meme_list_sort_reverse", True))
-
     def _remote_mode_warning(self) -> str:
         return "⚠️ 远程服务器模式（实验性）"
 
-    def _build_remote_cmd(self, cmd: str) -> tuple[str, dict[str, str]]:
-        if self._get_remote_auth_mode() != "密码登录":
-            return cmd, {}
-
-        password = self._get_remote_password()
-        askpass = tempfile.NamedTemporaryFile("w", delete=False, prefix="meme_updater_askpass_")
-        askpass.write("#!/bin/sh\nexec printf '%s\\n' \"$SSHPASS\"\n")
-        askpass.close()
-        os.chmod(askpass.name, 0o700)
-        env = {
-            "DISPLAY": ":0",
-            "SSH_ASKPASS": askpass.name,
-            "SSH_ASKPASS_REQUIRE": "force",
-            "SSHPASS": password,
-        }
-        return cmd, env
-
-    def _ssh_base_args(self) -> list[str]:
-        host = self._get_remote_host()
-        user = self._get_remote_user()
-        port = self._get_remote_port()
-        mode = self._get_remote_auth_mode()
-        key_path = self._get_remote_key_path()
-        if not _is_safe_ssh_arg(host):
-            raise ValueError("远程主机配置不合法")
-        if user and not _is_safe_ssh_arg(user):
-            raise ValueError("远程用户配置不合法")
-        if key_path and not _is_safe_ssh_arg(key_path):
-            raise ValueError("远程私钥路径配置不合法")
-        destination = f"{user}@{host}" if user else host
-        args = ["ssh", "-p", str(port)]
-        if mode == "私钥登录" and key_path:
-            args.extend(["-i", key_path])
-        if mode == "密码登录":
-            args.extend(["-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"])
-        args.extend(["--", destination])
-        return args
-
-    def _shell_join(self, args: list[str]) -> str:
-        return " ".join(shlex.quote(str(arg)) for arg in args)
-
-    async def _run_remote_cmd(self, cmd: str, timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[int, str]:
-        if self._get_remote_auth_mode() == "密码登录" and platform.system() == "Windows":
-            return -1, "Windows 环境不支持 SSH_ASKPASS 密码登录，请改用私钥登录"
-        remote_cmd, env = self._build_remote_cmd(cmd)
-        try:
-            return await self._run_cmd([*self._ssh_base_args(), remote_cmd], env=env, timeout=timeout)
-        finally:
-            if "SSH_ASKPASS" in env:
-                try:
-                    os.unlink(env["SSH_ASKPASS"])
-                except OSError:
-                    pass
-
-    def _get_repo_cmd_timeout(self, cmd: list[str] | str) -> int:
-        if isinstance(cmd, str):
-            normalized = cmd.lower()
-        else:
-            normalized = " ".join(str(part).lower() for part in cmd)
-        if "git clone" in normalized or "git fetch" in normalized:
-            return max(COMMAND_TIMEOUT_SECONDS, 600)
-        return COMMAND_TIMEOUT_SECONDS
-
-    async def _run_repo_cmd(self, cmd: list[str] | str, cwd: str | None = None, remote: bool = False) -> tuple[int, str]:
-        timeout = self._get_repo_cmd_timeout(cmd)
-        if remote:
-            remote_cmd = self._shell_join(cmd) if isinstance(cmd, list) else cmd
-            if cwd:
-                remote_cmd = f"cd {shlex.quote(cwd)} && {remote_cmd}"
-            return await self._run_remote_cmd(remote_cmd, timeout=timeout)
-        if isinstance(cmd, list):
-            return await self._run_cmd(cmd, cwd=cwd, timeout=timeout)
-        return await self._run_shell_cmd(cmd, cwd=cwd, timeout=timeout)
-
-    async def _run_cmd(self, cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[int, str]:
-        run_env = os.environ.copy()
-        if env:
-            run_env.update(env)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-            env=run_env,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return -1, f"命令执行超时（{timeout}秒）"
-        return int(proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
-
-    async def _run_shell_cmd(self, cmd: str, cwd: str | None = None, env: dict | None = None, timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[int, str]:
-        run_env = os.environ.copy()
-        if env:
-            run_env.update(env)
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-            env=run_env,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return -1, f"命令执行超时（{timeout}秒）"
-        return int(proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
-
     def _format_time(self, dt: datetime) -> str:
         return f"{dt.year}/{dt.month}/{dt.day} {dt:%H:%M:%S}"
-
-    def _format_commit_short(self, commit_info: str) -> str:
-        return (commit_info or "").split()[0][:8] if commit_info else "unknown"
-
-    def _get_owner_repo(self, url: str) -> str:
-        path = urlparse(url).path.strip("/")
-        path = path.removesuffix(".git")
-        parts = path.split("/")
-        return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else url)
-
-    async def _sync_repo(self, repo: dict, index: int, total: int) -> dict:
-        clone_path = repo["clone_dir"]
-        data_path = repo["data_dir"]
-        before_count = 0
-        owner_repo = repo.get("owner_repo") or self._get_owner_repo(repo["url"])
-        remote_mode = self._get_remote_enabled()
-        workdir = self._get_remote_workdir() if remote_mode else None
-
-        lines = [f"📦 [{index}/{total}] 正在更新 {owner_repo}..."]
-
-        if remote_mode:
-            remote_clone, remote_data = self._remote_repo_paths(repo)
-            remote_clone_parent = posixpath.dirname(remote_clone)
-            mkdir_cmd = f"mkdir -p {shlex.quote(remote_clone_parent)}"
-            ret, output = await self._run_remote_cmd(mkdir_cmd)
-            if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法创建远程仓库目录", f"    {output[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-            exists_cmd = f"test -d {shlex.quote(remote_clone + '/.git')}"
-            ret, _ = await self._run_repo_cmd(exists_cmd, remote=True, cwd=remote_clone_parent)
-            repo_clone_path = remote_clone
-            repo_data_path = remote_data
-            before_count = await self._count_remote_data_items(repo_data_path)
-        else:
-            ret = 0 if os.path.isdir(os.path.join(clone_path, ".git")) else 1
-            repo_clone_path = clone_path
-            repo_data_path = data_path
-            before_count = self._count_data_items(repo_data_path)
-
-        if ret == 0:
-            branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
-            ret, branch = await self._run_repo_cmd(branch_cmd, cwd=repo_clone_path, remote=remote_mode)
-            if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取当前分支", f"    {branch[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-
-            fetch_cmd = ["git", "fetch", "--depth", "1", "origin", branch]
-            ret, output = await self._run_repo_cmd(fetch_cmd, cwd=repo_clone_path, remote=remote_mode)
-            if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} git fetch 失败", f"    {output[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-
-            ret, local_commit = await self._run_repo_cmd(["git", "rev-parse", "HEAD"], cwd=repo_clone_path, remote=remote_mode)
-            if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取本地版本", f"    {local_commit[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-
-            ret, remote_commit = await self._run_repo_cmd(["git", "rev-parse", f"origin/{branch}"], cwd=repo_clone_path, remote=remote_mode)
-            if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法读取远端版本", f"    {remote_commit[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-
-            local_short = self._format_commit_short(local_commit)
-            remote_short = self._format_commit_short(remote_commit)
-
-            if local_commit == remote_commit:
-                lines.append(f"✅ [{index}/{total}] {owner_repo} 无更新 ({local_short})")
-                return {"status": "success", "updated": False, "lines": lines}
-
-            status_cmd = ["git", "status", "--porcelain"]
-            ret, status_output = await self._run_repo_cmd(status_cmd, cwd=repo_clone_path, remote=remote_mode)
-            if ret != 0:
-                lines.extend([f"❌ [{index}/{total}] {owner_repo} 无法检查本地修改", f"    {status_output[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-            if status_output.strip():
-                lines.extend([f"⚠️ [{index}/{total}] {owner_repo} 存在本地修改，已跳过覆盖更新", f"    {status_output[:300]}"])
-                return {"status": "failed", "updated": False, "lines": lines}
-
-            reset_cmd = ["git", "reset", "--hard", f"origin/{branch}"]
-            ret, output = await self._run_repo_cmd(reset_cmd, cwd=repo_clone_path, remote=remote_mode)
-            if ret == 0:
-                after_count = await self._count_remote_data_items(repo_data_path) if remote_mode else self._count_data_items(repo_data_path)
-                added = max(after_count - before_count, 0)
-                lines.extend([
-                    f"✅ [{index}/{total}] {owner_repo} 更新完成 ({local_short} → {remote_short})",
-                    f"    📁 新增 {added} 个 | {repo_data_path}",
-                ])
-                return {"status": "success", "updated": True, "lines": lines}
-
-            lines.extend([f"❌ [{index}/{total}] {owner_repo} git reset 失败", f"    {output[:300]}"])
-            return {"status": "failed", "updated": False, "lines": lines}
-
-        clone_cmd = ["git", "clone", "--depth", "1", repo["url"], repo_clone_path]
-        ret, output = await self._run_repo_cmd(clone_cmd, cwd=workdir if not remote_mode else posixpath.dirname(repo_clone_path), remote=remote_mode)
-        if ret == 0:
-            after_count = await self._count_remote_data_items(repo_data_path) if remote_mode else self._count_data_items(repo_data_path)
-            lines.extend([
-                f"✅ [{index}/{total}] {owner_repo} 克隆完成",
-                f"    📁 新增 {after_count} 个 | {repo_data_path}",
-            ])
-            return {"status": "success", "updated": True, "lines": lines}
-
-        lines.extend([f"❌ [{index}/{total}] {owner_repo} git clone 失败", f"    {output[:300]}"])
-        if not remote_mode and not os.path.isdir(os.path.join(clone_path, ".git")):
-            try:
-                os.rmdir(clone_path)
-            except OSError:
-                pass
-        return {"status": "failed", "updated": False, "lines": lines}
-
-    async def _restart_memeapi(self) -> dict:
-        container = self._get_docker_container()
-        remote_mode = self._get_remote_enabled()
-        lines = [f"{self._remote_mode_warning()}", f"准备重启容器 {container}..."] if remote_mode else [f"准备重启容器 {container}..."]
-
-        if remote_mode:
-            workdir = _normalize_remote_path(self._get_remote_workdir())
-            ret, output = await self._run_repo_cmd(
-                ["docker", "inspect", container],
-                cwd=workdir,
-                remote=True,
-            )
-            if ret != 0:
-                lines.extend([
-                    f"⚠️ 远程容器未找到：{container}",
-                    "    请先确认远端服务器已经部署了这个容器，并检查容器名是否填写正确。",
-                    f"    {output[:300]}",
-                ])
-                return {"success": False, "lines": lines}
-
-            ret, output = await self._run_repo_cmd(["docker", "restart", container], cwd=workdir, remote=True)
-            if ret != 0:
-                lines.extend(["❌ 重启容器失败", f"    {output[:300]}"])
-                return {"success": False, "lines": lines}
-
-            lines.append("⏳ 等待容器状态稳定...")
-            await asyncio.sleep(2)
-            ret, output = await self._run_repo_cmd(
-                ["docker", "inspect", "-f", "{{.State.Running}}", container],
-                cwd=workdir,
-                remote=True,
-            )
-            if ret == 0 and output.strip().lower() == "true":
-                lines.extend(["✅ 容器重启成功", f"🎉 {container} 已运行"])
-                return {"success": True, "lines": lines}
-
-            lines.extend(["❌ 容器未处于运行状态", f"    {output[:300]}"])
-            return {"success": False, "lines": lines}
-
-        ret, output = await self._run_cmd(["docker", "inspect", container])
-        if ret != 0:
-            lines.extend([
-                f"⚠️ 未找到本机容器 {container}",
-                "    请确认 Docker 上确实存在这个容器，并检查容器名是否填写正确。",
-                f"    {output[:300]}",
-            ])
-            return {"success": False, "lines": lines}
-
-        ret, output = await self._run_cmd(["docker", "restart", container])
-        if ret != 0:
-            lines.extend(["❌ 重启容器失败", f"    {output[:300]}"])
-            return {"success": False, "lines": lines}
-
-        lines.append("⏳ 等待容器状态稳定...")
-        await asyncio.sleep(2)
-
-        ret, output = await self._run_cmd(
-            ["docker", "inspect", "-f", "{{.State.Running}}", container]
-        )
-        if ret == 0 and output.strip().lower() == "true":
-            lines.extend(["✅ 容器重启成功", f"🎉 {container} 已运行"])
-            return {"success": True, "lines": lines}
-
-        lines.extend(["❌ 容器未处于运行状态", f"    {output[:300]}"])
-        return {"success": False, "lines": lines}
-
-    def _count_data_items(self, path: str) -> int:
-        if not os.path.isdir(path):
-            return 0
-        return len([item for item in os.listdir(path) if not item.startswith(".")])
-
-    async def _count_remote_data_items(self, path: str) -> int:
-        ret, output = await self._run_remote_cmd(
-            f"if [ -d {shlex.quote(path)} ]; then find {shlex.quote(path)} -mindepth 1 -maxdepth 1 ! -name '.*' | wc -l; else echo 0; fi"
-        )
-        if ret != 0:
-            return 0
-        try:
-            return int(output.strip().splitlines()[-1])
-        except (IndexError, ValueError):
-            return 0
-
-    async def _meme_get_json(self, paths: list[str], session: aiohttp.ClientSession | None = None):
-        errors = []
-        timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
-
-        async def request_once(active_session: aiohttp.ClientSession, path: str):
-            async with active_session.get(f"{self._get_meme_api_base_url()}{path}", timeout=timeout) as resp:
-                data = await self._read_limited_response(resp, MAX_JSON_RESPONSE_BYTES)
-                text = data.decode("utf-8", errors="replace")
-                if resp.status >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
-                content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
-                if content_type and content_type not in {"application/json", "text/json"} and not content_type.endswith("+json"):
-                    raise RuntimeError(f"meme API 返回非 JSON 内容：{content_type}")
-                try:
-                    return json.loads(text) if text else None
-                except json.JSONDecodeError as e:
-                    raise RuntimeError(f"meme API JSON 解析失败：{e.msg}，响应片段：{text[:120]}") from e
-
-        for attempt in range(1, 4):
-            if session:
-                for path in paths:
-                    try:
-                        return await request_once(session, path)
-                    except Exception as e:
-                        errors.append(f"{path}: {e}")
-            else:
-                async with aiohttp.ClientSession(timeout=timeout) as new_session:
-                    for path in paths:
-                        try:
-                            return await request_once(new_session, path)
-                        except Exception as e:
-                            errors.append(f"{path}: {e}")
-            if attempt < 3:
-                logger.warning(f"meme API 请求失败，准备重试 {attempt}/3：{errors[-1] if errors else '未知错误'}")
-                await asyncio.sleep(attempt * 2)
-        raise RuntimeError("; ".join(errors[-6:]) or "meme API 请求失败")
-
-    async def _meme_post_image(self, paths: list[str], *, json_body: dict | None = None, form_factory=None) -> tuple[bytes, str]:
-        last_error = ""
-        timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for path in paths:
-                try:
-                    kwargs = {}
-                    if form_factory is not None:
-                        kwargs["data"] = form_factory()
-                    else:
-                        kwargs["json"] = json_body or {}
-                    async with session.post(f"{self._get_meme_api_base_url()}{path}", **kwargs) as resp:
-                        data = await self._read_limited_response(resp)
-                        content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
-                        if resp.status < 400:
-                            return data, content_type
-                        last_error = data.decode("utf-8", errors="replace")[:300]
-                except Exception as e:
-                    last_error = str(e)
-        raise RuntimeError(last_error or "meme API 渲染失败")
-
-    async def _meme_get_image(self, paths: list[str]) -> tuple[bytes, str]:
-        last_error = ""
-        timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for path in paths:
-                try:
-                    async with session.get(f"{self._get_meme_api_base_url()}{path}", timeout=timeout) as resp:
-                        data = await self._read_limited_response(resp)
-                        content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
-                        if resp.status < 400:
-                            return data, content_type
-                        last_error = data.decode("utf-8", errors="replace")[:300]
-                except Exception as e:
-                    last_error = str(e)
-        raise RuntimeError(last_error or "meme API 图片请求失败")
 
     async def _refresh_meme_infos(self, force: bool = False) -> int:
         async with self._meme_info_lock:
             if self.meme_infos and not force:
                 return len(self.meme_infos)
-            logger.info(f"刷新 meme API 表情信息: {self._get_meme_api_base_url()}")
-            keys = await self._meme_get_json(["/memes/keys", "/keys"])
-            if not isinstance(keys, list):
-                raise RuntimeError("meme API 返回的 keys 格式不正确")
-
-            total = len(keys)
-            verbose_log = self._get_meme_refresh_verbose_log()
-            logger.info(f"meme API 返回 {total} 个表情，开始加载详情")
-            semaphore = asyncio.Semaphore(self._get_meme_info_concurrency())
-
-            async def load_info(session: aiohttp.ClientSession, index: int, key: str) -> tuple[str, dict] | None:
-                async with semaphore:
-                    if verbose_log:
-                        logger.info(f"[{index}/{total}] 获取表情信息: {key}")
-                    try:
-                        info = await self._meme_get_json([
-                            f"/memes/{quote(key, safe='')}/info",
-                            f"/memes/{quote(key, safe='')}/",
-                            f"/memes/{quote(key, safe='')}",
-                        ], session=session)
-                        if not isinstance(info, dict):
-                            logger.warning(f"{key} 的 info 格式不正确，跳过")
-                            return None
-                        info.setdefault("key", key)
-                        info.setdefault("keywords", [key])
-                        info.setdefault("shortcuts", [])
-                        info.setdefault("tags", [])
-                        return key, info
-                    except Exception as e:
-                        logger.warning(f"获取表情信息失败 {key}: {e}")
-                        return None
-
-            timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                results = await asyncio.gather(*(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)), return_exceptions=True)
-
-            entries = [r for r in results if r is not None and not isinstance(r, Exception)]
-            disabled_names = self._get_disabled_meme_names()
+            meme_infos = await self.meme_client.fetch_meme_infos()
+            entries = list(meme_infos.items())
+            disabled_names = self.plugin_config.disabled_meme_names()
             if disabled_names:
                 entries = [(key, info) for key, info in entries if not self._is_meme_disabled(key, info, disabled_names)]
             self.meme_infos = dict(entries)
             self._refresh_meme_shortcuts()
             logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
             return len(self.meme_infos)
+
+    async def _refresh_meme_infos_after_restart(self, lines: list[str]) -> None:
+        for attempt in range(1, MEME_API_RESTART_REFRESH_ATTEMPTS + 1):
+            if attempt > 1:
+                await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
+            try:
+                count = await self._refresh_meme_infos(force=True)
+                lines.append(f"✅ 已刷新表情信息，共载入 {count} 个表情")
+                return
+            except Exception as e:
+                if attempt == MEME_API_RESTART_REFRESH_ATTEMPTS:
+                    lines.append(f"⚠️ 刷新表情信息失败：{e}")
+                else:
+                    retry_line = f"⏳ meme API 尚未就绪，{MEME_API_RESTART_REFRESH_INTERVAL_SECONDS} 秒后重试刷新表情信息（外层第 {attempt}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次）"
+                    logger.warning(f"重启后刷新表情信息失败，准备重试外层第 {attempt + 1}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次：{e}")
+                    lines.append(retry_line)
 
     def _ensure_meme_info_refresh_task(self) -> asyncio.Task | None:
         if self.meme_infos:
@@ -921,7 +308,7 @@ class MemeUpdater(Star):
         return " ".join(values).lower()
 
     def _search_memes(self, query: str, limit: int | None = None) -> list[dict]:
-        limit = limit or self._get_meme_search_limit()
+        limit = limit or self.plugin_config.meme_search_limit()
         lowered = query.strip().lower()
         if not lowered:
             return []
@@ -975,9 +362,9 @@ class MemeUpdater(Star):
                 return index
         return 50
 
-    def _load_usage_font(self, size: int):
-        if ImageFont is None:
-            return None
+    def _usage_font_candidates_sorted(self) -> list[tuple[int, str]]:
+        if self._usage_font_candidates is not None:
+            return self._usage_font_candidates
         font_dirs = []
         if platform.system() == "Windows":
             windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or "C:/Windows"
@@ -998,25 +385,38 @@ class MemeUpdater(Star):
                 for name in files:
                     lower = name.lower()
                     if lower.endswith((".ttf", ".ttc", ".otf")):
-                        path = os.path.join(root, name)
-                        candidates.append((self._usage_font_priority(name), path))
-        for priority, path in sorted(candidates, key=lambda item: item[0]):
+                        candidates.append((self._usage_font_priority(name), os.path.join(root, name)))
+        self._usage_font_candidates = sorted(candidates, key=lambda item: item[0])
+        return self._usage_font_candidates
+
+    def _load_usage_font(self, size: int):
+        if ImageFont is None:
+            return None
+        cached_font = self._usage_font_cache.get(size)
+        if cached_font is not None:
+            return cached_font
+        candidates = self._usage_font_candidates_sorted()
+        for priority, path in candidates:
             if priority >= 100:
                 continue
             try:
                 font = ImageFont.truetype(path, size)
                 if self._font_supports_usage_text(font):
+                    self._usage_font_cache[size] = font
                     return font
             except Exception:
                 continue
-        for _, path in sorted(candidates, key=lambda item: item[0]):
+        for _, path in candidates:
             try:
                 font = ImageFont.truetype(path, size)
                 if self._font_supports_usage_text(font):
+                    self._usage_font_cache[size] = font
                     return font
             except Exception:
                 continue
-        return ImageFont.load_default()
+        font = ImageFont.load_default()
+        self._usage_font_cache[size] = font
+        return font
 
     def _draw_usage_text(self, draw, xy: tuple[int, int], text: str, font, fill: str, max_width: int | None = None) -> None:
         if not max_width:
@@ -1434,7 +834,7 @@ class MemeUpdater(Star):
         return {"name": bot_id or "机器人", "gender": "unknown"}
 
     async def _read_limited_response(self, resp: aiohttp.ClientResponse, limit: int | None = None) -> bytes:
-        max_bytes = limit or self._get_max_image_bytes()
+        max_bytes = limit or self.plugin_config.max_image_bytes()
         chunks = []
         total = 0
         async for chunk in resp.content.iter_chunked(64 * 1024):
@@ -1537,7 +937,7 @@ class MemeUpdater(Star):
         raise RuntimeError("图片下载重定向次数过多")
 
     async def _download_image(self, url: str) -> tuple[bytes, str, str]:
-        timeout = aiohttp.ClientTimeout(total=self._get_meme_request_timeout())
+        timeout = aiohttp.ClientTimeout(total=self.plugin_config.meme_request_timeout())
         async with aiohttp.ClientSession(timeout=timeout) as session:
             data, content_type = await self._request_external_image(session, url)
         ext = mimetypes.guess_extension(content_type) or ".png"
@@ -1828,7 +1228,7 @@ class MemeUpdater(Star):
         return list(images), texts, user_infos
 
     async def _fill_sender_avatar_images(self, event: AstrMessageEvent, images: list[tuple[bytes, str, str]], user_infos: list[dict], target_count: int):
-        if not self._get_meme_auto_sender_avatar() or len(images) >= target_count:
+        if not self.plugin_config.meme_auto_sender_avatar() or len(images) >= target_count:
             return
         avatar = self._sender_avatar_url(event)
         if not avatar:
@@ -1840,7 +1240,7 @@ class MemeUpdater(Star):
             user_infos.insert(0, user_info)
 
     async def _fill_default_avatar_images(self, event: AstrMessageEvent, images: list[tuple[bytes, str, str]], user_infos: list[dict], target_count: int):
-        if not self._get_meme_auto_sender_avatar() or images:
+        if not self.plugin_config.meme_auto_sender_avatar() or images:
             return
         sender_avatar = self._sender_avatar_url(event)
         bot_avatar = self._bot_avatar_url(event)
@@ -1887,25 +1287,32 @@ class MemeUpdater(Star):
             "default_texts": list(params.get("default_texts") or []),
         }
 
-    async def _render_meme(self, key: str, images: list[tuple[bytes, str, str]], texts: list[str], user_infos: list[dict], options: dict[str, object] | None = None) -> tuple[bytes, str]:
-        def make_form() -> aiohttp.FormData:
-            form = aiohttp.FormData()
-            for data, content_type, filename in images:
-                form.add_field("images", data, filename=filename, content_type=content_type)
-            for text in texts:
-                form.add_field("texts", str(text))
-            render_args = {"user_infos": user_infos}
-            if options:
-                render_args.update(options)
-            form.add_field("args", json.dumps(render_args, ensure_ascii=False))
-            return form
+    def _format_meme_list_text(self) -> str:
+        template = self.plugin_config.meme_list_text_template()
+        lines = []
+        for index, info in enumerate(self._sorted_meme_infos(), 1):
+            keywords = "、".join(str(value) for value in info.get("keywords", []) if str(value).strip())
+            line = template.format(
+                index=index,
+                key=info.get("key", ""),
+                keywords=keywords or self._meme_display_name(info),
+            )
+            lines.append(line)
+        return "\n".join(lines)
 
-        quoted_key = quote(str(key), safe="")
-        return await self._meme_post_image([
-            f"/memes/{quoted_key}/render",
-            f"/memes/{quoted_key}/",
-            f"/memes/{quoted_key}",
-        ], form_factory=make_form)
+    async def _render_list(self) -> tuple[bytes, str]:
+        meme_list = []
+        now = datetime.now().timestamp()
+        for index, info in enumerate(self._sorted_meme_infos(), 1):
+            labels = []
+            try:
+                created = self._parse_meme_time(info.get("date_created"))
+                if now - created <= 30 * 24 * 3600:
+                    labels.append("new")
+            except Exception:
+                pass
+            meme_list.append({"meme_key": info.get("key"), "disabled": False, "labels": labels, "index": index})
+        return await self.meme_client.render_list(meme_list, self.plugin_config.meme_list_text_template())
 
     def _parse_meme_time(self, value: object) -> float:
         if not value:
@@ -1922,8 +1329,8 @@ class MemeUpdater(Star):
         return ""
 
     def _sorted_meme_infos(self) -> list[dict]:
-        sort_by = self._get_meme_list_sort_by()
-        reverse = self._get_meme_list_sort_reverse()
+        sort_by = self.plugin_config.meme_list_sort_by()
+        reverse = self.plugin_config.meme_list_sort_reverse()
         infos = list(self.meme_infos.values())
         if sort_by == "名称":
             return sorted(infos, key=lambda info: str(info.get("key", "")).lower(), reverse=reverse)
@@ -1932,28 +1339,6 @@ class MemeUpdater(Star):
         if sort_by == "更新时间":
             return sorted(infos, key=lambda info: self._parse_meme_time(info.get("date_modified")), reverse=reverse)
         return sorted(infos, key=lambda info: self._parse_meme_time(info.get("date_created")), reverse=reverse)
-
-    async def _render_list(self) -> tuple[bytes, str]:
-        meme_list = []
-        now = datetime.now().timestamp()
-        for index, info in enumerate(self._sorted_meme_infos(), 1):
-            labels = []
-            try:
-                created = self._parse_meme_time(info.get("date_created"))
-                if now - created <= 30 * 24 * 3600:
-                    labels.append("new")
-            except Exception:
-                pass
-            meme_list.append({"meme_key": info.get("key"), "disabled": False, "labels": labels, "index": index})
-        return await self._meme_post_image([
-            "/memes/render_list",
-            "/memes/list",
-            "/render_list",
-        ], json_body={
-            "meme_list": meme_list,
-            "text_template": self._get_meme_list_text_template(),
-            "add_category_icon": True,
-        })
 
     def _image_component(self, data: bytes, content_type: str) -> Comp.Image:
         ext = mimetypes.guess_extension(content_type) or ".png"
@@ -2013,7 +1398,7 @@ class MemeUpdater(Star):
     async def restart_memeapi(self, event: AstrMessageEvent):
         try:
             yield event.plain_result("正在重启 memeapi 服务，请稍候...")
-            result = await self._restart_memeapi()
+            result = await self.repo_manager.restart_memeapi()
             yield event.plain_result("\n".join(result["lines"]))
         finally:
             self._stop_event(event)
@@ -2021,18 +1406,22 @@ class MemeUpdater(Star):
     @filter.command("更新表情包")
     async def update_memes(self, event: AstrMessageEvent):
         try:
+            if not self.plugin_config.repo_update_enabled():
+                yield event.plain_result("更新表情包功能未启用，请先在配置项 repo_update_enabled 中开启。")
+                return
+
             yield event.plain_result("正在更新表情包数据，请稍候...")
 
             os.makedirs(self._meme_data_dir, exist_ok=True)
 
             started_at = datetime.now()
-            repos = self._get_repos()
+            repos = self.repo_manager.repos()
             total = len(repos)
-            semaphore = asyncio.Semaphore(self._get_repo_update_concurrency())
+            semaphore = asyncio.Semaphore(self.plugin_config.repo_update_concurrency())
 
             async def sync_limited(repo: dict, index: int):
                 async with semaphore:
-                    return await self._sync_repo(repo, index, total)
+                    return await self.repo_manager.sync_repo(repo, index, total)
 
             results = await asyncio.gather(*[sync_limited(repo, i + 1) for i, repo in enumerate(repos)], return_exceptions=True)
             normalized_results = []
@@ -2047,16 +1436,11 @@ class MemeUpdater(Star):
             failed = sum(1 for r in results if r["status"] == "failed")
             updated = sum(1 for r in results if r["updated"])
 
-            restart_result = await self._restart_memeapi()
-
+            restart_result = await self.repo_manager.restart_memeapi()
             if restart_result["success"]:
                 restart_result["lines"].append("⏳ 等待 meme API 启动后刷新表情信息...")
-                await asyncio.sleep(5)
-                try:
-                    count = await self._refresh_meme_infos(force=True)
-                    restart_result["lines"].append(f"✅ 已刷新表情信息，共载入 {count} 个表情")
-                except Exception as e:
-                    restart_result["lines"].append(f"⚠️ 刷新表情信息失败：{e}")
+                await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
+                await self._refresh_meme_infos_after_restart(restart_result["lines"])
 
             finished_at = datetime.now()
             summary_lines = [
@@ -2082,11 +1466,7 @@ class MemeUpdater(Star):
                     )
                     summary_lines.append(f"  - {success_line}")
 
-            summary_lines.extend([
-                f"📊 仓库更新统计: 成功 {success} | 失败 {failed} | 有更新 {updated}",
-                "准备重启 memeapi...",
-            ])
-
+            summary_lines.append("准备重启 memeapi...")
             summary_lines.extend(restart_result["lines"])
             summary_lines.append("========================")
             summary_lines.append(f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}")
@@ -2103,59 +1483,41 @@ class MemeUpdater(Star):
         self._stop_event(event)
         lines = ["表情包仓库状态:"]
 
-        repos = self._get_repos()
+        repos = self.repo_manager.repos()
 
         for repo in repos:
-            if self._get_remote_enabled():
-                clone_path, data_path = self._remote_repo_paths(repo)
-                ret, _ = await self._run_remote_cmd(f"test -d {shlex.quote(clone_path)}")
-                if ret != 0:
-                    lines.append(f"[未克隆] {repo['name']} | {data_path}")
-                    continue
-
-                ret, commit_info = await self._run_repo_cmd(
-                    ["git", "log", "-1", "--format=%h %s (%cr)"], cwd=clone_path, remote=True
-                )
-                if ret == 0:
-                    count = await self._count_remote_data_items(data_path)
-                    lines.append(f"[已安装] {repo['name']} | {count} 项 | {data_path} | {commit_info}")
-                else:
-                    lines.append(f"[异常] {repo['name']}: 无法读取 git 信息 | {data_path}")
-                continue
-
-            clone_path = repo["clone_dir"]
-            data_path = repo["data_dir"]
-
-            if not os.path.isdir(clone_path):
-                lines.append(f"[未克隆] {repo['name']} | {data_path}")
-                continue
-
-            ret, commit_info = await self._run_cmd(
-                ["git", "log", "-1", "--format=%h %s (%cr)"], cwd=clone_path
-            )
-            if ret == 0:
-                count = self._count_data_items(data_path)
-                lines.append(f"[已安装] {repo['name']} | {count} 项 | {data_path} | {commit_info}")
-            else:
-                lines.append(f"[异常] {repo['name']}: 无法读取 git 信息 | {data_path}")
+            lines.append(await self.repo_manager.repo_status(repo))
 
         try:
             count = await self._refresh_meme_infos()
-            lines.append(f"meme API: 已加载 {count} 个表情 | {self._get_meme_api_base_url()}")
+            lines.append(f"meme API: 已加载 {count} 个表情 | {self.plugin_config.meme_api_base_url()}")
         except Exception as e:
-            lines.append(f"meme API: 无法连接或加载失败 | {self._get_meme_api_base_url()} | {e}")
+            lines.append(f"meme API: 无法连接或加载失败 | {self.plugin_config.meme_api_base_url()} | {e}")
 
         yield event.plain_result("\n".join(lines))
 
     @filter.command("刷新表情信息")
     async def refresh_meme_infos(self, event: AstrMessageEvent):
         self._stop_event(event)
-        yield event.plain_result("正在刷新 meme API 表情信息...")
+        task = self._meme_info_refresh_task
+        if task and not task.done():
+            yield event.plain_result("meme API 表情信息仍在后台加载中，请稍后再试。")
+            return
+        if task and task.done():
+            try:
+                task.result()
+            except Exception:
+                pass
+        task = asyncio.create_task(self._refresh_meme_infos(force=True))
+        self._meme_info_refresh_task = task
         try:
-            count = await self._refresh_meme_infos(force=True)
-            yield event.plain_result(f"刷新完成，共载入 {count} 个表情。")
+            count = await task
+            yield event.plain_result(f"表情信息刷新完成，共载入 {count} 个表情。")
         except Exception as e:
-            yield event.plain_result(f"刷新失败：{e}")
+            yield event.plain_result(f"刷新表情信息失败：{e}")
+        finally:
+            if self._meme_info_refresh_task is task:
+                self._meme_info_refresh_task = None
 
     @filter.command("表情统计")
     async def meme_usage_stats(self, event: AstrMessageEvent):
@@ -2168,11 +1530,12 @@ class MemeUpdater(Star):
             return
         try:
             await self._refresh_meme_infos()
-            image, content_type = self._render_meme_usage_stats(rows, scope=scope, group_id=group_id)
+            title_override = None if group_id else "总表情统计"
+            image, content_type = await asyncio.to_thread(self._render_meme_usage_stats, rows, scope=scope, group_id=group_id, title_override=title_override)
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"生成表情调用统计图失败: {e}")
-            yield event.plain_result(self.usage_stats.format_text(rows))
+            yield event.plain_result(self.usage_stats.format_text(rows, scope=scope, group_id=group_id))
 
     @filter.command("总表情统计")
     async def meme_global_usage_stats(self, event: AstrMessageEvent):
@@ -2183,7 +1546,7 @@ class MemeUpdater(Star):
             return
         try:
             await self._refresh_meme_infos()
-            image, content_type = self._render_meme_usage_stats(rows, scope="global", title_override="总表情统计")
+            image, content_type = await asyncio.to_thread(self._render_meme_usage_stats, rows, scope="global", title_override="总表情统计")
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"生成总表情调用统计图失败: {e}")
@@ -2204,7 +1567,7 @@ class MemeUpdater(Star):
                 return
             title = f"搜索结果（查看 {len(matches)} 条搜索结果）"
             result_text = "\n".join([title, *[self._format_meme_search_result(index, info) for index, info in enumerate(matches, 1)]])
-            if self._get_meme_search_forward_enabled() and await self._try_send_forward_message(event, title, result_text, len(matches)):
+            if self.plugin_config.meme_search_forward_enabled() and await self._try_send_forward_message(event, title, result_text, len(matches)):
                 return
             yield event.plain_result(result_text)
         except Exception as e:
@@ -2214,8 +1577,16 @@ class MemeUpdater(Star):
     async def meme_list(self, event: AstrMessageEvent):
         try:
             await self._refresh_meme_infos()
-            image, content_type = await self._render_list()
-            yield event.chain_result([self._image_component(image, content_type)])
+            try:
+                image, content_type = await self._render_list()
+                yield event.chain_result([self._image_component(image, content_type)])
+                return
+            except Exception as e:
+                logger.warning(f"meme API 渲染表情列表失败，降级为文本列表: {e}")
+            result_text = self._format_meme_list_text()
+            if self.plugin_config.meme_search_forward_enabled() and await self._try_send_forward_message(event, "表情列表", result_text, len(self.meme_infos)):
+                return
+            yield event.plain_result(result_text)
         except Exception as e:
             yield event.plain_result(f"获取表情列表失败：{e}")
         finally:
@@ -2250,8 +1621,7 @@ class MemeUpdater(Star):
                     lines.append(f"默认文字：{_format_keywords([str(v) for v in params['default_texts']])}")
             yield event.plain_result("\n".join(lines))
             try:
-                key = quote(str(info.get("key")), safe="")
-                image, content_type = await self._meme_get_image([f"/memes/{key}/preview", f"/memes/{key}/preview/"])
+                image, content_type = await self.meme_client.get_preview(str(info.get("key")))
                 yield event.chain_result([self._image_component(image, content_type)])
             except Exception as e:
                 logger.debug(f"获取表情预览失败 {info.get('key')}: {e}")
@@ -2279,12 +1649,12 @@ class MemeUpdater(Star):
             params = self._params_type(info)
             rest, options = self._normalize_turn_options(str(info.get("key")), rest)
             images, texts, user_infos = await self._resolve_generate_args(event, rest)
-            if self._get_meme_auto_sender_avatar() and len(images) < params["min_images"]:
+            if self.plugin_config.meme_auto_sender_avatar() and len(images) < params["min_images"]:
                 if images:
                     await self._fill_sender_avatar_images(event, images, user_infos, params["min_images"])
                 else:
                     await self._fill_default_avatar_images(event, images, user_infos, params["min_images"])
-            if self._get_meme_auto_default_texts() and not texts:
+            if self.plugin_config.meme_auto_default_texts() and not texts:
                 texts.extend(str(v) for v in params["default_texts"])
             if not (params["min_images"] <= len(images) <= params["max_images"]):
                 yield event.plain_result(f"图片数量不符，需要 {_format_range(params['min_images'], params['max_images'])} 张，当前 {len(images)} 张。")
@@ -2292,7 +1662,7 @@ class MemeUpdater(Star):
             if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
                 yield event.plain_result(f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。")
                 return
-            image, content_type = await self._render_meme(str(info.get("key")), images, texts, user_infos, options)
+            image, content_type = await self.meme_client.render_meme(str(info.get("key")), images, texts, user_infos, options)
             await self.usage_stats.record(event, info)
             async for result in self._yield_and_stop(event, event.chain_result([self._image_component(image, content_type)])):
                 yield result
@@ -2325,7 +1695,7 @@ class MemeUpdater(Star):
                     if auto_use:
                         await self._fill_default_avatar_images(event, render_images, render_user_infos, params["min_images"])
                     render_texts = [str(v) for v in params["default_texts"]] if auto_use else texts
-                    image, content_type = await self._render_meme(str(info.get("key")), render_images, render_texts, render_user_infos, options)
+                    image, content_type = await self.meme_client.render_meme(str(info.get("key")), render_images, render_texts, render_user_infos, options)
                     await self.usage_stats.record(event, info)
                     keywords = _format_keywords([str(v) for v in info.get("keywords", [])])
                     async for result in self._yield_and_stop(event, event.chain_result([
@@ -2343,7 +1713,7 @@ class MemeUpdater(Star):
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):
-        if not self._get_meme_poke_random_enabled():
+        if not self.plugin_config.meme_poke_random_enabled():
             return
         async for result in self._random_meme_results(event, "", resolve_args=False):
             yield result
@@ -2357,7 +1727,7 @@ class MemeUpdater(Star):
             self._stop_event(event)
             return
 
-        if not self._get_meme_shortcut_enabled():
+        if not self.plugin_config.meme_shortcut_enabled():
             return
 
         if not content or content.startswith(("/", "#", "%", "％")):
@@ -2397,13 +1767,13 @@ class MemeUpdater(Star):
                 elif len(images) > params["max_images"]:
                     images, user_infos = self._select_render_images(images, user_infos, params["max_images"])
 
-                if self._get_meme_auto_sender_avatar() and len(images) < params["min_images"]:
+                if self.plugin_config.meme_auto_sender_avatar() and len(images) < params["min_images"]:
                     if images:
                         await self._fill_sender_avatar_images(event, images, user_infos, params["min_images"])
                     else:
                         await self._fill_default_avatar_images(event, images, user_infos, params["min_images"])
 
-                if self._get_meme_auto_default_texts() and not texts:
+                if self.plugin_config.meme_auto_default_texts() and not texts:
                     texts.extend(str(v) for v in params["default_texts"])
 
                 if not (params["min_images"] <= len(images) <= params["max_images"]):
@@ -2411,7 +1781,7 @@ class MemeUpdater(Star):
                 if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
                     continue
 
-                image, content_type = await self._render_meme(key, images, texts, user_infos, options)
+                image, content_type = await self.meme_client.render_meme(key, images, texts, user_infos, options)
                 await self.usage_stats.record(event, info)
                 yield event.chain_result([self._image_component(image, content_type)])
                 self._stop_event(event)
