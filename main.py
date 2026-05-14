@@ -106,7 +106,7 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.1.7")
+@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.1.8")
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1441,11 +1441,13 @@ class MemeUpdater(Star):
             failed = sum(1 for r in results if r["status"] == "failed")
             updated = sum(1 for r in results if r["updated"])
 
-            restart_result = await self.repo_manager.restart_memeapi()
-            if restart_result["success"]:
-                restart_result["lines"].append("⏳ 等待 meme API 启动后刷新表情信息...")
-                await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
-                await self._refresh_meme_infos_after_restart(restart_result["lines"])
+            restart_result = None
+            if updated > 0:
+                restart_result = await self.repo_manager.restart_memeapi()
+                if restart_result["success"]:
+                    restart_result["lines"].append("⏳ 等待 meme API 启动后刷新表情信息...")
+                    await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
+                    await self._refresh_meme_infos_after_restart(restart_result["lines"])
 
             finished_at = datetime.now()
             summary_lines = [
@@ -1471,10 +1473,16 @@ class MemeUpdater(Star):
                     )
                     summary_lines.append(f"  - {success_line}")
 
-            summary_lines.append("准备重启 memeapi...")
-            summary_lines.extend(restart_result["lines"])
-            summary_lines.append("========================")
-            summary_lines.append(f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}")
+            if restart_result:
+                summary_lines.append("准备重启 memeapi...")
+                summary_lines.extend(restart_result["lines"])
+                summary_lines.append("========================")
+                summary_lines.append(f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}")
+            else:
+                summary_lines.extend([
+                    "仓库无更新，已跳过 memeapi 重启。",
+                    "========================",
+                ])
 
             yield event.plain_result("\n".join(summary_lines))
         except Exception as e:

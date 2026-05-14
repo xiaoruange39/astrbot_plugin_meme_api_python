@@ -108,6 +108,12 @@
     "type": "bool",
     "default": false
   },
+  "local_workdir": {
+    "description": "本机工作目录",
+    "hint": "本机 memeapi 根目录。未启用远程服务器时，仓库会更新到这里；应与 memeapi 容器挂载读取的目录一致。",
+    "type": "string",
+    "default": "/root/memeapi"
+  },
   "repo_list": {
     "description": "表情包仓库列表",
     "hint": "每一项都是一条仓库配置，可在网页里新增、删除或复制。",

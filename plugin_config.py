@@ -4,6 +4,7 @@ import posixpath
 from urllib.parse import urlparse
 
 SCREEN_SESSION = "meme-generator"
+DEFAULT_MEME_WORKDIR = "/root/memeapi"
 
 DEFAULT_REPO_SPECS = [
     {
@@ -92,24 +93,52 @@ class MemePluginConfig:
             })
         return repos
 
+    def _repo_paths_from_data_dir(self, data_dir: str, base_dir: str) -> tuple[str, str, str] | None:
+        normalized_data = os.path.normpath(data_dir)
+        normalized_base = os.path.normpath(base_dir)
+        try:
+            rel_data = os.path.relpath(normalized_data, normalized_base)
+        except ValueError:
+            return None
+        if rel_data == "." or rel_data.startswith("..") or os.path.isabs(rel_data):
+            return None
+        rel_data = rel_data.replace("\\", "/")
+        if not is_safe_relative_path(rel_data):
+            return None
+        clone_subdir = os.path.dirname(rel_data).replace("\\", "/")
+        data_leaf = os.path.basename(rel_data)
+        if not clone_subdir or not data_leaf:
+            return None
+        return clone_subdir, data_leaf, os.path.join(normalized_base, clone_subdir)
+
     def repos(self) -> list[dict]:
         default_repos = self._default_repos()
         repos = self.config.get("repo_list", default_repos)
         if not isinstance(repos, list):
             return default_repos
 
+        base_dir = self.remote_workdir() if self.remote_enabled() else self.local_workdir()
         result = []
         for repo in repos:
             if not isinstance(repo, dict):
                 continue
             url = str(repo.get("url", "")).strip()
-            data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
-            if not url or has_shell_control_chars(url) or not is_allowed_repo_url(url) or not is_safe_relative_path(data_subdir):
+            if not url or has_shell_control_chars(url) or not is_allowed_repo_url(url):
                 continue
-            clone_dir = os.path.join(self.meme_data_dir, data_subdir)
-            data_leaf = str(repo.get("data_leaf", "")).strip()
-            if data_leaf and not is_safe_relative_path(data_leaf):
-                continue
+            data_dir = str(repo.get("data_dir") or "").strip()
+            if data_dir:
+                data_dir = os.path.join(base_dir, data_dir.lstrip("/\\")) if os.path.isabs(data_dir) and not os.path.normpath(data_dir).startswith(os.path.normpath(base_dir)) else data_dir
+            paths = self._repo_paths_from_data_dir(data_dir, base_dir) if data_dir else None
+            if paths:
+                data_subdir, data_leaf, clone_dir = paths
+            else:
+                data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
+                if not is_safe_relative_path(data_subdir):
+                    continue
+                clone_dir = os.path.join(base_dir, data_subdir)
+                data_leaf = str(repo.get("data_leaf", "")).strip()
+                if data_leaf and not is_safe_relative_path(data_leaf):
+                    continue
             data_dir = os.path.join(clone_dir, data_leaf) if data_leaf else clone_dir
             name = os.path.basename(clone_dir) or url.rstrip("/").split("/")[-1].removesuffix(".git")
             result.append({
@@ -148,8 +177,12 @@ class MemePluginConfig:
     def remote_key_path(self) -> str:
         return str(self.config.get("remote_key_path", "")).strip()
 
+    def local_workdir(self) -> str:
+        workdir = str(self.config.get("local_workdir", DEFAULT_MEME_WORKDIR)).strip() or DEFAULT_MEME_WORKDIR
+        return self.meme_data_dir if has_shell_control_chars(workdir) else workdir
+
     def remote_workdir(self) -> str:
-        workdir = str(self.config.get("remote_workdir", self.meme_data_dir)).strip() or self.meme_data_dir
+        workdir = str(self.config.get("remote_workdir", DEFAULT_MEME_WORKDIR)).strip() or DEFAULT_MEME_WORKDIR
         return self.meme_data_dir if has_shell_control_chars(workdir) else workdir
 
     def docker_container(self) -> str:
