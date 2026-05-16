@@ -18,7 +18,7 @@ import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import EventMessageType
+from astrbot.api.event.filter import EventMessageType, PermissionType
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 import astrbot.api.message_components as Comp
@@ -106,7 +106,7 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.1.8")
+@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.1.9")
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -284,11 +284,14 @@ class MemeUpdater(Star):
         self.meme_shortcuts = shortcuts
 
     def _find_meme(self, query: str) -> dict | None:
+        return self._find_meme_in_infos(query, self.meme_infos)
+
+    def _find_meme_in_infos(self, query: str, meme_infos: dict[str, dict]) -> dict | None:
         query = query.strip()
-        if query in self.meme_infos:
-            return self.meme_infos[query]
+        if query in meme_infos:
+            return meme_infos[query]
         lowered = query.lower()
-        for info in self.meme_infos.values():
+        for info in meme_infos.values():
             for field in ("keywords", "tags"):
                 if any(str(value).lower() == lowered for value in info.get(field, [])):
                     return info
@@ -327,11 +330,32 @@ class MemeUpdater(Star):
         return [*exact_matches, *fuzzy_matches][:limit]
 
     def _meme_display_name(self, info: dict) -> str:
-        keywords = [str(value) for value in info.get("keywords", []) if str(value).strip()]
+        for value in info.get("keywords", []):
+            keyword = str(value).strip()
+            if keyword and self._remove_emoji(keyword):
+                return keyword
+        keywords = [str(value).strip() for value in info.get("keywords", []) if str(value).strip()]
         return keywords[0] if keywords else str(info.get("key", ""))
 
     def _format_meme_search_result(self, index: int, info: dict) -> str:
         return f"{index}. {self._meme_display_name(info)}"
+
+    def _remove_emoji(self, text: str) -> str:
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F1E6-\U0001F1FF"
+            "\U0001F300-\U0001F5FF"
+            "\U0001F600-\U0001F64F"
+            "\U0001F680-\U0001F6FF"
+            "\U0001F700-\U0001F77F"
+            "\U0001F780-\U0001F7FF"
+            "\U0001F800-\U0001F8FF"
+            "\U0001F900-\U0001F9FF"
+            "\U0001FA00-\U0001FAFF"
+            "]+",
+            flags=re.UNICODE,
+        )
+        return emoji_pattern.sub("", text).replace("️", "").replace("‍", "").strip()
 
     def _font_supports_usage_text(self, font) -> bool:
         try:
@@ -517,6 +541,51 @@ class MemeUpdater(Star):
             badge_box = (badge_x, y + 26 * scale, x + card_w - 18 * scale, y + 58 * scale)
             draw.rounded_rectangle(badge_box, radius=16 * scale, fill="#eef5ff")
             self._draw_centered_text(draw, badge_box, count_text, count_font, "#3f78c8")
+        output = io.BytesIO()
+        image.convert("RGB").save(output, format="PNG")
+        return output.getvalue(), "image/png"
+
+    def _render_disabled_memes(self, names: list[str], title: str = "屏蔽表情列表") -> tuple[bytes, str]:
+        if Image is None or ImageDraw is None:
+            raise RuntimeError("Pillow 不可用")
+        scale = 2
+        columns = 4
+        card_w, card_h = 250 * scale, 70 * scale
+        gap_x, gap_y = 22 * scale, 20 * scale
+        margin_x, top_h, bottom = 58 * scale, 178 * scale, 58 * scale
+        row_count = max(1, (len(names) + columns - 1) // columns) if names else 1
+        width = margin_x * 2 + columns * card_w + (columns - 1) * gap_x
+        height = top_h + row_count * card_h + (row_count - 1) * gap_y + bottom
+        image = self._vertical_gradient(width, height, (248, 251, 255), (239, 245, 252)).convert("RGBA")
+        self._draw_soft_circle(image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70))
+        self._draw_soft_circle(image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62))
+        self._draw_soft_circle(image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52))
+        draw = ImageDraw.Draw(image)
+        title_font = self._load_usage_font(42 * scale)
+        subtitle_font = self._load_usage_font(20 * scale)
+        name_font = self._load_usage_font(21 * scale)
+        rank_font = self._load_usage_font(14 * scale)
+        title_box = draw.textbbox((0, 0), title, font=title_font)
+        draw.text(((width - (title_box[2] - title_box[0])) // 2, 42 * scale), title, font=title_font, fill="#14213d")
+        subtitle = f"已屏蔽 {len(names)} 个表情"
+        subtitle_w, _ = self._text_size(draw, subtitle, subtitle_font)
+        pill_box = ((width - subtitle_w - 52 * scale) // 2, 103 * scale, (width + subtitle_w + 52 * scale) // 2, 143 * scale)
+        draw.rounded_rectangle(pill_box, radius=20 * scale, fill=(255, 255, 255, 178), outline=(255, 255, 255, 230), width=scale)
+        self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
+        for index, name in enumerate(names):
+            row, col = divmod(index, columns)
+            x = margin_x + col * (card_w + gap_x)
+            y = top_h + row * (card_h + gap_y)
+            shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            shadow_draw = ImageDraw.Draw(shadow)
+            shadow_draw.rounded_rectangle((x + 3 * scale, y + 5 * scale, x + card_w + 3 * scale, y + card_h + 5 * scale), radius=20 * scale, fill=(48, 72, 102, 22))
+            image.alpha_composite(shadow)
+            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=20 * scale, fill=(255, 255, 255, 218), outline=(255, 255, 255, 245), width=scale)
+            draw.rounded_rectangle((x + 14 * scale, y + 16 * scale, x + 19 * scale, y + card_h - 16 * scale), radius=3 * scale, fill="#ef4444")
+            rank = f"#{index + 1}"
+            draw.text((x + 30 * scale, y + 14 * scale), rank, font=rank_font, fill="#9aa9b8")
+            clean_name = self._remove_emoji(name)
+            self._draw_usage_text(draw, (x + 30 * scale, y + 34 * scale), clean_name, name_font, "#1f2d3d", card_w - 50 * scale)
         output = io.BytesIO()
         image.convert("RGB").save(output, format="PNG")
         return output.getvalue(), "image/png"
@@ -1399,6 +1468,7 @@ class MemeUpdater(Star):
             return "", self._direction_options_for_key("left")
         return raw_args, {}
 
+    @filter.permission_type(PermissionType.ADMIN)
     @filter.command("重启memeapi")
     async def restart_memeapi(self, event: AstrMessageEvent):
         try:
@@ -1408,6 +1478,7 @@ class MemeUpdater(Star):
         finally:
             self._stop_event(event)
 
+    @filter.permission_type(PermissionType.ADMIN)
     @filter.command("更新表情包")
     async def update_memes(self, event: AstrMessageEvent):
         try:
@@ -1491,6 +1562,7 @@ class MemeUpdater(Star):
         finally:
             self._stop_event(event)
 
+    @filter.permission_type(PermissionType.ADMIN)
     @filter.command("表情包状态")
     async def meme_status(self, event: AstrMessageEvent):
         self._stop_event(event)
@@ -1509,6 +1581,7 @@ class MemeUpdater(Star):
 
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(PermissionType.ADMIN)
     @filter.command("刷新表情信息")
     async def refresh_meme_infos(self, event: AstrMessageEvent):
         self._stop_event(event)
@@ -1531,6 +1604,82 @@ class MemeUpdater(Star):
         finally:
             if self._meme_info_refresh_task is task:
                 self._meme_info_refresh_task = None
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("屏蔽表情")
+    async def disable_meme(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        name = self._get_message_args(event, "屏蔽表情")
+        if not name:
+            yield event.plain_result("用法：屏蔽表情 <表情名/关键词/key>")
+            return
+        await self._refresh_meme_infos()
+        info = self._find_meme(name)
+        if not info:
+            yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
+            return
+        key = str(info.get("key", name))
+        display_name = self._meme_display_name(info)
+        current = list(self.plugin_config.disabled_meme_names())
+        if self._is_meme_disabled(key, info, set(current)):
+            yield event.plain_result(f"“{name}” 已在屏蔽列表中。")
+            return
+        current.append(display_name)
+        self.config["meme_disabled_keys"] = current
+        await self._refresh_meme_infos(force=True)
+        yield event.plain_result(f"已屏蔽表情 “{display_name}”，当前共屏蔽 {len(current)} 个。")
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("取消屏蔽表情")
+    async def enable_meme(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        name = self._get_message_args(event, "取消屏蔽表情")
+        if not name:
+            yield event.plain_result("用法：取消屏蔽表情 <表情名/关键词/key>")
+            return
+        all_meme_infos = await self.meme_client.fetch_meme_infos()
+        info = self._find_meme_in_infos(name, all_meme_infos)
+        if not info:
+            yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
+            return
+        key = str(info.get("key", name))
+        candidates = [key, *[str(value).strip() for value in info.get("keywords", []) if str(value).strip()]]
+        current = list(self.plugin_config.disabled_meme_names())
+        removed = next((value for value in candidates if value in current), None)
+        if not removed:
+            yield event.plain_result(f"表情 “{self._meme_display_name(info)}” 不在屏蔽列表中。")
+            return
+        current.remove(removed)
+        self.config["meme_disabled_keys"] = current
+        await self._refresh_meme_infos(force=True)
+        yield event.plain_result(f"已取消屏蔽 “{self._meme_display_name(info)}”，当前共屏蔽 {len(current)} 个。")
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("屏蔽表情列表")
+    async def list_disabled_memes(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        keys = sorted(self.plugin_config.disabled_meme_names())
+        if not keys:
+            yield event.plain_result("当前没有屏蔽任何表情。")
+            return
+        all_meme_infos = await self.meme_client.fetch_meme_infos()
+        display_names = []
+        for disabled_key in keys:
+            info = all_meme_infos.get(disabled_key)
+            if not info:
+                for key, candidate in all_meme_infos.items():
+                    if self._is_meme_disabled(key, candidate, {disabled_key}):
+                        info = candidate
+                        break
+            display_names.append(self._meme_display_name(info) if info else disabled_key)
+        try:
+            image, content_type = await asyncio.to_thread(self._render_disabled_memes, display_names)
+            yield event.chain_result([self._image_component(image, content_type)])
+        except Exception as e:
+            logger.warning(f"渲染屏蔽表情列表图片失败: {e}")
+            lines = [f"当前屏蔽 {len(display_names)} 个表情："]
+            lines.extend(f"  {i}. {n}" for i, n in enumerate(display_names, 1))
+            yield event.plain_result("\n".join(lines))
 
     @filter.command("表情统计")
     async def meme_usage_stats(self, event: AstrMessageEvent):
