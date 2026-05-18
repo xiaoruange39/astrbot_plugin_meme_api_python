@@ -30,9 +30,34 @@
     "default": false
   },
   "meme_disabled_keys": {
-    "description": "屏蔽指定表情包",
-    "hint": "填写 meme key 或中文关键词。屏蔽后不会出现在列表、详情、随机表情和快捷指令中。",
+    "description": "全局屏蔽指定表情包（兼容旧配置）",
+    "hint": "旧版全局屏蔽配置。新配置请使用下面的分群屏蔽表情列表。",
     "type": "list",
+    "default": []
+  },
+  "meme_disabled_groups": {
+    "description": "分群屏蔽表情列表",
+    "hint": "每一项是一条群屏蔽配置，可在网页里新增、删除或复制。",
+    "type": "template_list",
+    "templates": {
+      "disabled_group_item": {
+        "name": "群屏蔽配置",
+        "hint": "填写群号和该群要屏蔽的表情关键词",
+        "items": {
+          "group_id": {
+            "type": "string",
+            "description": "群号",
+            "default": ""
+          },
+          "keywords": {
+            "type": "list",
+            "description": "屏蔽关键词",
+            "hint": "填写 meme key 或中文关键词。只在这个群内屏蔽。",
+            "default": []
+          }
+        }
+      }
+    },
     "default": []
   },
   "meme_search_limit": {

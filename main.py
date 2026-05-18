@@ -101,7 +101,7 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.1")
+@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.2")
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -162,11 +162,7 @@ class MemeUpdater(Star):
             if self.meme_infos and not force:
                 return len(self.meme_infos)
             meme_infos = await self.meme_client.fetch_meme_infos()
-            entries = list(meme_infos.items())
-            disabled_names = self.plugin_config.disabled_meme_names()
-            if disabled_names:
-                entries = [(key, info) for key, info in entries if not self.disabled_memes.is_meme_disabled(key, info, disabled_names)]
-            self.meme_infos = dict(entries)
+            self.meme_infos = dict(meme_infos.items())
             self._refresh_meme_shortcuts()
             logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
             return len(self.meme_infos)
@@ -270,8 +266,21 @@ class MemeUpdater(Star):
         shortcuts.sort(key=lambda item: len(item["regex"]), reverse=True)
         self.meme_shortcuts = shortcuts
 
-    def _find_meme(self, query: str) -> dict | None:
-        return self.disabled_memes.find_meme_in_infos(query, self.meme_infos)
+    def _disabled_names_for_event(self, event: AstrMessageEvent) -> set[str]:
+        return self.plugin_config.disabled_meme_names_for_group(self._group_id(event))
+
+    def _visible_meme_infos(self, event: AstrMessageEvent) -> dict[str, dict]:
+        disabled_names = self._disabled_names_for_event(event)
+        if not disabled_names:
+            return self.meme_infos
+        return {
+            key: info
+            for key, info in self.meme_infos.items()
+            if not self.disabled_memes.is_meme_disabled(key, info, disabled_names)
+        }
+
+    def _find_meme(self, query: str, meme_infos: dict[str, dict] | None = None) -> dict | None:
+        return self.disabled_memes.find_meme_in_infos(query, meme_infos or self.meme_infos)
 
     def _meme_search_text(self, info: dict) -> str:
         values = [str(info.get("key", ""))]
@@ -282,14 +291,14 @@ class MemeUpdater(Star):
                 values.append(str(shortcut.get("humanized") or shortcut.get("key") or ""))
         return " ".join(values).lower()
 
-    def _search_memes(self, query: str, limit: int | None = None) -> list[dict]:
+    def _search_memes(self, query: str, meme_infos: dict[str, dict] | None = None, limit: int | None = None) -> list[dict]:
         limit = limit or self.plugin_config.meme_search_limit()
         lowered = query.strip().lower()
         if not lowered:
             return []
         exact_matches = []
         fuzzy_matches = []
-        for info in self._sorted_meme_infos():
+        for info in self._sorted_meme_infos(meme_infos):
             key = str(info.get("key", ""))
             keywords = [str(value) for value in info.get("keywords", [])]
             candidates = [key, *keywords]
@@ -301,6 +310,36 @@ class MemeUpdater(Star):
 
     def _format_meme_search_result(self, index: int, info: dict) -> str:
         return f"{index}. {self.disabled_memes.meme_display_name(info)}"
+
+    def _block_scope_from_args(self, event: AstrMessageEvent, args: str) -> tuple[str, str]:
+        parts = split_arg_string(args)
+        if len(parts) >= 2 and re.fullmatch(r"\d{5,20}", parts[0]):
+            return parts[0], " ".join(parts[1:])
+        return self._group_id(event), args
+
+    def _block_list_scope_from_args(self, event: AstrMessageEvent, args: str) -> str:
+        args = args.strip()
+        if args and re.fullmatch(r"\d{5,20}", args):
+            return args
+        return self._group_id(event)
+
+    async def _block_scope_title(self, event: AstrMessageEvent, group_id: str) -> tuple[str, str]:
+        if not group_id:
+            return "全局屏蔽表情列表", "全局"
+        event_group_id = self._group_id(event)
+        group_name = self._group_name_from_event(event, group_id) if group_id == event_group_id else ""
+        group_name = group_name or await self._lookup_group_name(event, group_id)
+        title = f"屏蔽表情列表 - {group_name}（{group_id}）" if group_name else f"屏蔽表情列表 - 群 {group_id}"
+        return title, "当前群" if group_id == event_group_id else f"群 {group_id}"
+
+    async def _block_scope_name(self, event: AstrMessageEvent, group_id: str) -> str:
+        if not group_id:
+            return "全局"
+        event_group_id = self._group_id(event)
+        if group_id == event_group_id:
+            return "本群"
+        group_name = await self._lookup_group_name(event, group_id)
+        return f"群 {group_name}（{group_id}）" if group_name else f"群 {group_id}"
 
     def _get_message_args(self, event: AstrMessageEvent, command_name: str) -> str:
         message = self._extract_message_text(event)
@@ -1073,10 +1112,10 @@ class MemeUpdater(Star):
             "default_texts": list(params.get("default_texts") or []),
         }
 
-    def _format_meme_list_text(self) -> str:
+    def _format_meme_list_text(self, meme_infos: dict[str, dict] | None = None) -> str:
         template = self.plugin_config.meme_list_text_template()
         lines = []
-        for index, info in enumerate(self._sorted_meme_infos(), 1):
+        for index, info in enumerate(self._sorted_meme_infos(meme_infos), 1):
             keywords = "、".join(str(value) for value in info.get("keywords", []) if str(value).strip())
             line = template.format(
                 index=index,
@@ -1086,10 +1125,10 @@ class MemeUpdater(Star):
             lines.append(line)
         return "\n".join(lines)
 
-    async def _render_list(self) -> tuple[bytes, str]:
+    async def _render_list(self, meme_infos: dict[str, dict] | None = None) -> tuple[bytes, str]:
         meme_list = []
         now = datetime.now().timestamp()
-        for index, info in enumerate(self._sorted_meme_infos(), 1):
+        for index, info in enumerate(self._sorted_meme_infos(meme_infos), 1):
             labels = []
             try:
                 created = self._parse_meme_time(info.get("date_created"))
@@ -1114,10 +1153,10 @@ class MemeUpdater(Star):
             return str(keywords[0]).lower()
         return ""
 
-    def _sorted_meme_infos(self) -> list[dict]:
+    def _sorted_meme_infos(self, meme_infos: dict[str, dict] | None = None) -> list[dict]:
         sort_by = self.plugin_config.meme_list_sort_by()
         reverse = self.plugin_config.meme_list_sort_reverse()
-        infos = list(self.meme_infos.values())
+        infos = list((meme_infos or self.meme_infos).values())
         if sort_by == "名称":
             return sorted(infos, key=lambda info: str(info.get("key", "")).lower(), reverse=reverse)
         if sort_by == "关键词":
@@ -1323,18 +1362,22 @@ class MemeUpdater(Star):
         self._stop_event(event)
         name = self._get_message_args(event, "屏蔽表情")
         if not name:
-            yield event.plain_result("用法：屏蔽表情 <表情名/关键词/key>")
+            yield event.plain_result("用法：屏蔽表情 [群号] <表情名/关键词/key>")
             return
+        group_id, name = self._block_scope_from_args(event, name)
+        if not name:
+            yield event.plain_result("用法：屏蔽表情 [群号] <表情名/关键词/key>")
+            return
+        scope_name = await self._block_scope_name(event, group_id)
         all_meme_infos = await self.meme_client.fetch_meme_infos()
-        result = self.disabled_memes.disable(name, all_meme_infos)
+        result = self.disabled_memes.disable(group_id, name, all_meme_infos)
         if result.status == "not_found":
             yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
             return
         if result.status == "already_disabled":
-            yield event.plain_result(f"“{name}” 已在屏蔽列表中。")
+            yield event.plain_result(f"“{name}” 已在{scope_name}屏蔽列表中。")
             return
-        await self._refresh_meme_infos(force=True)
-        yield event.plain_result(f"已屏蔽表情 “{result.display_name}”，当前共屏蔽 {result.count} 个。")
+        yield event.plain_result(f"已在{scope_name}屏蔽表情 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。")
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("取消屏蔽表情")
@@ -1342,35 +1385,42 @@ class MemeUpdater(Star):
         self._stop_event(event)
         name = self._get_message_args(event, "取消屏蔽表情")
         if not name:
-            yield event.plain_result("用法：取消屏蔽表情 <表情名/关键词/key>")
+            yield event.plain_result("用法：取消屏蔽表情 [群号] <表情名/关键词/key>")
             return
+        group_id, name = self._block_scope_from_args(event, name)
+        if not name:
+            yield event.plain_result("用法：取消屏蔽表情 [群号] <表情名/关键词/key>")
+            return
+        scope_name = await self._block_scope_name(event, group_id)
         all_meme_infos = await self.meme_client.fetch_meme_infos()
-        result = self.disabled_memes.enable(name, all_meme_infos)
+        result = self.disabled_memes.enable(group_id, name, all_meme_infos)
         if result.status == "not_found":
             yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
             return
         if result.status == "not_disabled":
-            yield event.plain_result(f"表情 “{result.display_name}” 不在屏蔽列表中。")
+            yield event.plain_result(f"表情 “{result.display_name}” 不在{scope_name}屏蔽列表中。")
             return
-        await self._refresh_meme_infos(force=True)
-        yield event.plain_result(f"已取消屏蔽 “{result.display_name}”，当前共屏蔽 {result.count} 个。")
+        yield event.plain_result(f"已在{scope_name}取消屏蔽 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。")
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("屏蔽表情列表")
     async def list_disabled_memes(self, event: AstrMessageEvent):
         self._stop_event(event)
-        keys = sorted(self.plugin_config.disabled_meme_names())
+        args = self._get_message_args(event, "屏蔽表情列表")
+        group_id = self._block_list_scope_from_args(event, args)
+        title, scope_name = await self._block_scope_title(event, group_id)
+        keys = sorted(self.plugin_config.disabled_meme_names_for_group(group_id))
         if not keys:
-            yield event.plain_result("当前没有屏蔽任何表情。")
+            yield event.plain_result(f"{scope_name}没有屏蔽任何表情。")
             return
         all_meme_infos = await self.meme_client.fetch_meme_infos()
-        display_names = self.disabled_memes.disabled_display_names(all_meme_infos)
+        display_names = self.disabled_memes.disabled_display_names(all_meme_infos, set(keys))
         try:
-            image, content_type = await asyncio.to_thread(self.image_renderer.render_disabled_memes, display_names)
+            image, content_type = await asyncio.to_thread(self.image_renderer.render_disabled_memes, display_names, title)
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"渲染屏蔽表情列表图片失败: {e}")
-            lines = [f"当前屏蔽 {len(display_names)} 个表情："]
+            lines = [f"{title}：共屏蔽 {len(display_names)} 个表情"]
             lines.extend(f"  {i}. {n}" for i, n in enumerate(display_names, 1))
             yield event.plain_result("\n".join(lines))
 
@@ -1416,7 +1466,8 @@ class MemeUpdater(Star):
             return
         try:
             await self._refresh_meme_infos()
-            matches = self._search_memes(query)
+            visible_infos = self._visible_meme_infos(event)
+            matches = self._search_memes(query, visible_infos)
             if not matches:
                 yield event.plain_result(f"未找到相关表情：{query}")
                 return
@@ -1432,14 +1483,15 @@ class MemeUpdater(Star):
     async def meme_list(self, event: AstrMessageEvent):
         try:
             await self._refresh_meme_infos()
+            visible_infos = self._visible_meme_infos(event)
             try:
-                image, content_type = await self._render_list()
+                image, content_type = await self._render_list(visible_infos)
                 yield event.chain_result([self._image_component(image, content_type)])
                 return
             except Exception as e:
                 logger.warning(f"meme API 渲染表情列表失败，降级为文本列表: {e}")
-            result_text = self._format_meme_list_text()
-            if self.plugin_config.meme_search_forward_enabled() and await self._try_send_forward_message(event, "表情列表", result_text, len(self.meme_infos)):
+            result_text = self._format_meme_list_text(visible_infos)
+            if self.plugin_config.meme_search_forward_enabled() and await self._try_send_forward_message(event, "表情列表", result_text, len(visible_infos)):
                 return
             yield event.plain_result(result_text)
         except Exception as e:
@@ -1456,7 +1508,7 @@ class MemeUpdater(Star):
             return
         try:
             await self._refresh_meme_infos()
-            info = self._find_meme(query)
+            info = self._find_meme(query, self._visible_meme_infos(event))
             if not info:
                 yield event.plain_result(f"未找到表情：{query}")
                 return
@@ -1498,7 +1550,7 @@ class MemeUpdater(Star):
                 return
             query, rest = parts[0], " ".join(parts[1:])
             await self._refresh_meme_infos()
-            info = self._find_meme(query)
+            info = self._find_meme(query, self._visible_meme_infos(event))
             if not info:
                 yield event.plain_result(f"未找到表情：{query}")
                 return
@@ -1538,7 +1590,7 @@ class MemeUpdater(Star):
                 images, texts, user_infos = [], [], []
             auto_use = not images and not texts
             suitable = []
-            for info in self.meme_infos.values():
+            for info in self._visible_meme_infos(event).values():
                 params = self._params_type(info)
                 image_count = params["min_images"] if auto_use else len(images)
                 if params["min_images"] <= image_count <= params["max_images"] and (auto_use or params["min_texts"] <= len(texts) <= params["max_texts"]):
@@ -1595,6 +1647,7 @@ class MemeUpdater(Star):
                 return
         if not self.meme_shortcuts:
             self._refresh_meme_shortcuts()
+        visible_infos = self._visible_meme_infos(event)
         try:
             for shortcut in self.meme_shortcuts:
                 match = shortcut["compiled_regex"].match(content)
@@ -1602,7 +1655,7 @@ class MemeUpdater(Star):
                     continue
                 tail = content[match.end():].strip()
                 resolved_args = " ".join(value for value in [self._shortcut_args(shortcut["args"], match), tail] if value).strip()
-                info = self.meme_infos.get(shortcut["key"])
+                info = visible_infos.get(shortcut["key"])
                 if not info:
                     continue
                 params = self._params_type(info)

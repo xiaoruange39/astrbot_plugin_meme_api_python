@@ -246,8 +246,7 @@ class MemePluginConfig:
     def meme_refresh_verbose_log(self) -> bool:
         return bool(self.config.get("meme_refresh_verbose_log", False))
 
-    def disabled_meme_names(self) -> set[str]:
-        value = self.config.get("meme_disabled_keys", [])
+    def _normalize_disabled_items(self, value) -> set[str]:
         if isinstance(value, str):
             items = re.split(r"[\s,，]+", value)
         elif isinstance(value, list):
@@ -255,6 +254,30 @@ class MemePluginConfig:
         else:
             items = []
         return {str(item).strip() for item in items if str(item).strip()}
+
+    def disabled_meme_names(self) -> set[str]:
+        return self._normalize_disabled_items(self.config.get("meme_disabled_keys", []))
+
+    def disabled_meme_groups(self) -> dict[str, set[str]]:
+        value = self.config.get("meme_disabled_groups", [])
+        if not isinstance(value, list):
+            return {}
+        result = {}
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            group_id = str(item.get("group_id", "")).strip()
+            if not group_id:
+                continue
+            names = self._normalize_disabled_items(item.get("keywords", []))
+            result[group_id] = names
+        return result
+
+    def disabled_meme_names_for_group(self, group_id: str) -> set[str]:
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return self.disabled_meme_names()
+        return set(self.disabled_meme_groups().get(group_id, set()))
 
     def meme_search_limit(self) -> int:
         try:

@@ -63,37 +63,80 @@ class DisabledMemeManager:
         )
         return emoji_pattern.sub("", text).replace("️", "").replace("‍", "").strip()
 
-    def disable(self, name: str, meme_infos: dict[str, dict]) -> DisabledMemeResult:
+    def _disabled_group_entries(self) -> list[dict]:
+        entries = self.config.get("meme_disabled_groups", [])
+        return entries if isinstance(entries, list) else []
+
+    def _group_keywords(self, group_id: str) -> list[str]:
+        group_id = str(group_id or "").strip()
+        for item in self._disabled_group_entries():
+            if isinstance(item, dict) and str(item.get("group_id", "")).strip() == group_id:
+                keywords = item.get("keywords", [])
+                if isinstance(keywords, str):
+                    return [value for value in re.split(r"[\s,，]+", keywords) if value]
+                if isinstance(keywords, list):
+                    return [str(value).strip() for value in keywords if str(value).strip()]
+                return []
+        return []
+
+    def _set_group_keywords(self, group_id: str, keywords: list[str]) -> None:
+        group_id = str(group_id or "").strip()
+        entries = [item for item in self._disabled_group_entries() if isinstance(item, dict)]
+        for item in entries:
+            if str(item.get("group_id", "")).strip() == group_id:
+                item["group_id"] = group_id
+                item["keywords"] = keywords
+                self.config["meme_disabled_groups"] = entries
+                return
+        entries.append({"__template_key": "disabled_group_item", "group_id": group_id, "keywords": keywords})
+        self.config["meme_disabled_groups"] = entries
+
+    def _global_keywords(self) -> list[str]:
+        return sorted(self.plugin_config.disabled_meme_names())
+
+    def _set_global_keywords(self, keywords: list[str]) -> None:
+        self.config["meme_disabled_keys"] = keywords
+
+    def _scope_keywords(self, group_id: str) -> list[str]:
+        return self._group_keywords(group_id) if group_id else self._global_keywords()
+
+    def _set_scope_keywords(self, group_id: str, keywords: list[str]) -> None:
+        if group_id:
+            self._set_group_keywords(group_id, keywords)
+        else:
+            self._set_global_keywords(keywords)
+
+    def disable(self, group_id: str, name: str, meme_infos: dict[str, dict]) -> DisabledMemeResult:
         info = self.find_meme_in_infos(name, meme_infos)
         if not info:
             return DisabledMemeResult("not_found")
         key = str(info.get("key", name))
         display_name = self.meme_display_name(info)
-        current = list(self.plugin_config.disabled_meme_names())
+        current = self._scope_keywords(group_id)
         if self.is_meme_disabled(key, info, set(current)):
             return DisabledMemeResult("already_disabled", display_name, len(current))
         current.append(display_name)
-        self.config["meme_disabled_keys"] = current
+        self._set_scope_keywords(group_id, current)
         return DisabledMemeResult("disabled", display_name, len(current))
 
-    def enable(self, name: str, all_meme_infos: dict[str, dict]) -> DisabledMemeResult:
+    def enable(self, group_id: str, name: str, all_meme_infos: dict[str, dict]) -> DisabledMemeResult:
         info = self.find_meme_in_infos(name, all_meme_infos)
         if not info:
             return DisabledMemeResult("not_found")
         key = str(info.get("key", name))
         display_name = self.meme_display_name(info)
         candidates = [key, *[str(value).strip() for value in info.get("keywords", []) if str(value).strip()]]
-        current = list(self.plugin_config.disabled_meme_names())
+        current = self._scope_keywords(group_id)
         removed = next((value for value in candidates if value in current), None)
         if not removed:
             return DisabledMemeResult("not_disabled", display_name, len(current))
         current.remove(removed)
-        self.config["meme_disabled_keys"] = current
+        self._set_scope_keywords(group_id, current)
         return DisabledMemeResult("enabled", display_name, len(current))
 
-    def disabled_display_names(self, all_meme_infos: dict[str, dict]) -> list[str]:
+    def disabled_display_names(self, all_meme_infos: dict[str, dict], disabled_names: set[str]) -> list[str]:
         names = []
-        for disabled_key in sorted(self.plugin_config.disabled_meme_names()):
+        for disabled_key in sorted(disabled_names):
             info = all_meme_infos.get(disabled_key)
             if not info:
                 for key, candidate in all_meme_infos.items():
