@@ -275,9 +275,10 @@ class MemePluginConfig:
 
     def disabled_meme_names_for_group(self, group_id: str) -> set[str]:
         group_id = str(group_id or "").strip()
-        if not group_id:
-            return self.disabled_meme_names()
-        return set(self.disabled_meme_groups().get(group_id, set()))
+        names = set(self.disabled_meme_names())
+        if group_id:
+            names.update(self.disabled_meme_groups().get(group_id, set()))
+        return names
 
     def meme_search_limit(self) -> int:
         try:

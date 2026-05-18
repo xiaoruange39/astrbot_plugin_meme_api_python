@@ -101,7 +101,7 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.2")
+@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.3")
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1356,19 +1356,20 @@ class MemeUpdater(Star):
             if self._meme_info_refresh_task is task:
                 self._meme_info_refresh_task = None
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("屏蔽表情")
-    async def disable_meme(self, event: AstrMessageEvent):
+    async def _set_meme_disabled(self, event: AstrMessageEvent, command_name: str, force_global: bool = False):
         self._stop_event(event)
-        name = self._get_message_args(event, "屏蔽表情")
+        name = self._get_message_args(event, command_name)
         if not name:
-            yield event.plain_result("用法：屏蔽表情 [群号] <表情名/关键词/key>")
+            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
             return
-        group_id, name = self._block_scope_from_args(event, name)
+        if force_global:
+            group_id = ""
+        else:
+            group_id, name = self._block_scope_from_args(event, name)
         if not name:
-            yield event.plain_result("用法：屏蔽表情 [群号] <表情名/关键词/key>")
+            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
             return
-        scope_name = await self._block_scope_name(event, group_id)
+        scope_name = "全局" if force_global else await self._block_scope_name(event, group_id)
         all_meme_infos = await self.meme_client.fetch_meme_infos()
         result = self.disabled_memes.disable(group_id, name, all_meme_infos)
         if result.status == "not_found":
@@ -1379,19 +1380,20 @@ class MemeUpdater(Star):
             return
         yield event.plain_result(f"已在{scope_name}屏蔽表情 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。")
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("取消屏蔽表情")
-    async def enable_meme(self, event: AstrMessageEvent):
+    async def _unset_meme_disabled(self, event: AstrMessageEvent, command_name: str, force_global: bool = False):
         self._stop_event(event)
-        name = self._get_message_args(event, "取消屏蔽表情")
+        name = self._get_message_args(event, command_name)
         if not name:
-            yield event.plain_result("用法：取消屏蔽表情 [群号] <表情名/关键词/key>")
+            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
             return
-        group_id, name = self._block_scope_from_args(event, name)
+        if force_global:
+            group_id = ""
+        else:
+            group_id, name = self._block_scope_from_args(event, name)
         if not name:
-            yield event.plain_result("用法：取消屏蔽表情 [群号] <表情名/关键词/key>")
+            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
             return
-        scope_name = await self._block_scope_name(event, group_id)
+        scope_name = "全局" if force_global else await self._block_scope_name(event, group_id)
         all_meme_infos = await self.meme_client.fetch_meme_infos()
         result = self.disabled_memes.enable(group_id, name, all_meme_infos)
         if result.status == "not_found":
@@ -1401,6 +1403,30 @@ class MemeUpdater(Star):
             yield event.plain_result(f"表情 “{result.display_name}” 不在{scope_name}屏蔽列表中。")
             return
         yield event.plain_result(f"已在{scope_name}取消屏蔽 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。")
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("屏蔽表情")
+    async def disable_meme(self, event: AstrMessageEvent):
+        async for result in self._set_meme_disabled(event, "屏蔽表情"):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("取消屏蔽表情")
+    async def enable_meme(self, event: AstrMessageEvent):
+        async for result in self._unset_meme_disabled(event, "取消屏蔽表情"):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局屏蔽表情")
+    async def disable_meme_globally(self, event: AstrMessageEvent):
+        async for result in self._set_meme_disabled(event, "全局屏蔽表情", force_global=True):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("取消全局屏蔽表情")
+    async def enable_meme_globally(self, event: AstrMessageEvent):
+        async for result in self._unset_meme_disabled(event, "取消全局屏蔽表情", force_global=True):
+            yield result
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("屏蔽表情列表")
