@@ -12,6 +12,7 @@ from datetime import datetime
 from urllib.parse import quote, urlparse
 
 import aiohttp
+from quart import jsonify, request
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.event import AstrMessageEvent, filter
@@ -134,6 +135,104 @@ class MemeUpdater(Star):
         )
         self.image_renderer = MemeImageRenderer(self.usage_stats, self.disabled_memes.remove_emoji)
         self.usage_stats.register_web_apis(context, "astrbot_plugin_meme_api_python")
+        context.register_web_api(
+            "/astrbot_plugin_meme_api_python/disabled-memes",
+            self.web_get_disabled_memes,
+            ["GET"],
+            "获取屏蔽表情列表",
+        )
+        context.register_web_api(
+            "/astrbot_plugin_meme_api_python/disabled-memes/add",
+            self.web_add_disabled_meme,
+            ["POST"],
+            "添加屏蔽表情",
+        )
+        context.register_web_api(
+            "/astrbot_plugin_meme_api_python/disabled-memes/delete",
+            self.web_delete_disabled_meme,
+            ["POST", "DELETE"],
+            "删除屏蔽表情",
+        )
+
+    async def _all_meme_infos_for_disabled_web(self) -> dict[str, dict]:
+        await self._refresh_meme_infos()
+        return self.meme_infos
+
+    async def web_get_disabled_memes(self):
+        try:
+            all_meme_infos = await self._all_meme_infos_for_disabled_web()
+            global_names = self.plugin_config.disabled_meme_names()
+            groups = {}
+            for group_id, names in self.plugin_config.disabled_meme_groups().items():
+                display_names = self.disabled_memes.disabled_display_names(all_meme_infos, names)
+                groups[group_id] = {"count": len(display_names), "items": display_names}
+            global_display_names = self.disabled_memes.disabled_display_names(all_meme_infos, global_names)
+            return jsonify({
+                "global": {"count": len(global_display_names), "items": global_display_names},
+                "groups": groups,
+                "group_names": self.usage_stats.normalize(self.usage_stats.load()).get("group_names", {}),
+            })
+        except Exception as e:
+            logger.error(f"Plugin Page 获取屏蔽表情列表失败: {e}")
+            return jsonify({"global": {"count": 0, "items": []}, "groups": {}, "group_names": {}, "error": str(e)})
+
+    async def _disabled_meme_params(self) -> dict:
+        payload = {}
+        try:
+            if request.is_json:
+                data = await request.get_json(silent=True)
+                if isinstance(data, dict):
+                    payload.update(data)
+        except Exception:
+            pass
+        payload.update(request.args)
+        try:
+            form = await request.form
+            payload.update(form)
+        except Exception:
+            pass
+        return payload
+
+    def _disabled_meme_scope(self, params: dict) -> str:
+        scope = str(params.get("scope", "global")).strip()
+        group_id = str(params.get("group_id", "")).strip()
+        return group_id if scope == "group" and group_id else ""
+
+    async def web_add_disabled_meme(self):
+        try:
+            params = await self._disabled_meme_params()
+            name = str(params.get("name", "")).strip()
+            if not name:
+                return jsonify({"success": False, "message": "未提供表情名或关键词"}), 400
+            group_id = self._disabled_meme_scope(params)
+            all_meme_infos = await self._all_meme_infos_for_disabled_web()
+            result = self.disabled_memes.disable(group_id, name, all_meme_infos)
+            if result.status == "not_found":
+                return jsonify({"success": False, "message": f"未找到表情：{name}"}), 404
+            if result.status == "already_disabled":
+                return jsonify({"success": True, "message": "已在屏蔽列表中", "status": result.status})
+            return jsonify({"success": True, "message": f"已屏蔽 {result.display_name}", "status": result.status})
+        except Exception as e:
+            logger.error(f"Plugin Page 添加屏蔽表情失败: {e}")
+            return jsonify({"success": False, "message": str(e)}), 500
+
+    async def web_delete_disabled_meme(self):
+        try:
+            params = await self._disabled_meme_params()
+            name = str(params.get("name", "")).strip()
+            if not name:
+                return jsonify({"success": False, "message": "未提供表情名或关键词"}), 400
+            group_id = self._disabled_meme_scope(params)
+            all_meme_infos = await self._all_meme_infos_for_disabled_web()
+            result = self.disabled_memes.enable(group_id, name, all_meme_infos)
+            if result.status == "not_found":
+                return jsonify({"success": False, "message": f"未找到表情：{name}"}), 404
+            if result.status == "not_disabled":
+                return jsonify({"success": True, "message": "不在屏蔽列表中", "status": result.status})
+            return jsonify({"success": True, "message": f"已取消屏蔽 {result.display_name}", "status": result.status})
+        except Exception as e:
+            logger.error(f"Plugin Page 删除屏蔽表情失败: {e}")
+            return jsonify({"success": False, "message": str(e)}), 500
 
     @property
     def meme_infos(self) -> dict[str, dict]:

@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>表情管理</title>
+    <style>
+      :root {
+        --bg1: #f8fbff;
+        --bg2: #eef5fc;
+        --card: rgba(255, 255, 255, 0.72);
+        --card-solid: #ffffff;
+        --text: #1f2d3d;
+        --muted: #52677d;
+        --light: #9aa9b8;
+        --blue: #5b8def;
+        --blue2: #3f78c8;
+        --danger: #ef4444;
+        --line: rgba(255, 255, 255, 0.78);
+        --shadow: 0 18px 45px rgba(48, 72, 102, 0.14);
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        min-height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 9% 8%, rgba(145, 190, 255, 0.34), transparent 26%),
+          radial-gradient(circle at 88% 18%, rgba(255, 176, 211, 0.28), transparent 25%),
+          radial-gradient(circle at 50% 108%, rgba(176, 224, 210, 0.28), transparent 24%),
+          linear-gradient(180deg, var(--bg1), var(--bg2));
+        overflow: hidden;
+      }
+
+      .app { height: 100vh; padding: 28px 32px 32px; display: flex; flex-direction: column; gap: 22px; }
+      .top { display: flex; align-items: center; justify-content: center; position: relative; }
+      .top h1 { font-size: 34px; line-height: 1; color: #14213d; letter-spacing: -0.6px; }
+      .top-actions { position: absolute; right: 0; display: flex; gap: 10px; }
+      button { border: none; cursor: pointer; font: inherit; transition: transform .18s ease, box-shadow .18s ease, background .18s ease; }
+      button:hover { transform: translateY(-1px); }
+      .btn { padding: 10px 18px; border-radius: 999px; color: var(--muted); background: rgba(255,255,255,.72); box-shadow: 0 10px 25px rgba(48,72,102,.08); }
+      .btn.danger { color: var(--danger); background: rgba(239,68,68,.12); }
+
+      .layout { min-height: 0; flex: 1; display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; }
+      .panel { background: var(--card); border: 1px solid var(--line); border-radius: 28px; box-shadow: var(--shadow); backdrop-filter: blur(16px); overflow: hidden; animation: panel-in .42s ease-out both; }
+      .sidebar { display: flex; flex-direction: column; min-height: 0; animation-delay: .04s; }
+      .side-head { padding: 22px 20px 14px; text-align: center; border-bottom: 1px solid rgba(154,169,184,.16); }
+      .side-head h2 { font-size: 19px; margin-bottom: 12px; }
+      .hint { font-size: 12px; color: var(--light); }
+      .groups { list-style: none; padding: 12px 12px; overflow: auto; min-height: 0; }
+      .section { display: block !important; padding: 0 !important; cursor: default !important; overflow: visible !important; }
+      .section + .section { margin-top: 12px; }
+      .section:hover { transform: none !important; background: transparent !important; }
+      .section::before { display: none !important; }
+      .section-toggle { width: 100%; padding: 12px 14px; border-radius: 16px; display: flex; align-items: center; justify-content: space-between; color: var(--text); background: rgba(255,255,255,.54); font-weight: 800; }
+      .section-toggle:hover { transform: none; background: rgba(255,255,255,.78); }
+      .section-toggle.active { color: var(--blue2); background: rgba(91,141,239,.14); }
+      .section-items { list-style: none; padding: 6px 0 12px; }
+      .section-items.collapsed { display: none; }
+      .chevron { color: var(--light); font-size: 12px; }
+      .groups li:not(.section) { position: relative; padding: 12px 16px; border-radius: 12px; cursor: pointer; display: flex; justify-content: space-between; gap: 10px; align-items: center; overflow: hidden; animation: item-in .32s ease-out both; transition: background .18s ease, transform .18s ease; }
+      .groups li + li { margin-top: 4px; }
+      .groups li:not(.section):hover { transform: translateX(3px); }
+      .groups li:not(.section):hover, .groups li:not(.section).active { background: rgba(91, 141, 239, 0.16); }
+      .groups li:not(.section).active::before { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(91,141,239,.18), rgba(91,141,239,0)); pointer-events: none; }
+      .group-info { min-width: 0; position: relative; z-index: 1; }
+      .group-name { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .group-meta { margin-top: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+      .spark { width: 110px; height: 38px; opacity: 1; position: relative; z-index: 1; flex: none; }
+      .spark-fill-shape { opacity: 0; animation: spark-fill-in .55s ease-out .16s forwards; }
+      .spark-line-shape { stroke-dasharray: 1; stroke-dashoffset: 1; animation: spark-draw .72s cubic-bezier(.22,.61,.36,1) forwards; }
+      @keyframes spark-draw { to { stroke-dashoffset: 0; } }
+      @keyframes spark-fill-in { to { opacity: 1; } }
+
+      .content { min-width: 0; padding: 30px; overflow: auto; }
+      .detail-head { position: relative; display: flex; justify-content: center; gap: 16px; align-items: flex-start; }
+      .title-block { text-align: center; flex: 1; }
+      .title-block h2 { font-size: 22px; margin-bottom: 0; }
+      #deleteScope { position: absolute; right: 0; top: 0; }
+      .hero { text-align: center; margin: 24px 0 28px; animation: hero-in .34s ease-out both; }
+      .hero-count { font-size: 44px; line-height: 1; font-weight: 800; color: var(--danger); letter-spacing: -1px; animation: count-pop .42s cubic-bezier(.18,.89,.32,1.28) both; }
+      .hero-sub { color: var(--muted); margin-top: 10px; }
+      .hero-id { color: var(--light); font-size: 13px; margin-top: 4px; }
+
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 18px; }
+      .meme-card { min-height: 82px; border-radius: 20px; background: rgba(255,255,255,.78); border: 1px solid rgba(255,255,255,.86); box-shadow: 0 10px 22px rgba(48,72,102,.08); padding: 16px 18px 14px 30px; position: relative; overflow: hidden; animation: card-in .32s ease-out both; transition: transform .18s ease, box-shadow .18s ease; }
+      .meme-card:hover { transform: translateY(-2px); box-shadow: 0 14px 28px rgba(48,72,102,.12); }
+      .bar { position: absolute; left: 14px; bottom: 13px; width: 5px; min-height: 18px; border-radius: 999px; background: var(--blue); }
+      .rank { font-size: 12px; color: var(--light); font-weight: 700; }
+      .meme-row { margin-top: 7px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .meme-name { font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .count { flex: none; color: var(--blue2); background: #eef5ff; border-radius: 999px; padding: 7px 13px; font-size: 13px; font-weight: 700; }
+      .meme-key { color: var(--light); font-size: 12px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .delete-one { position: absolute; right: 10px; top: 8px; color: var(--danger); background: transparent; font-size: 12px; opacity: 0; }
+      .meme-card:hover .delete-one { opacity: 1; }
+
+      .disabled-add-card { min-height: 82px; border-radius: 20px; border: 2px dashed rgba(82,103,125,.42); color: var(--light); background: rgba(255,255,255,.34); display: flex; align-items: center; justify-content: center; font-size: 42px; cursor: pointer; transition: transform .18s ease, background .18s ease, border-color .18s ease; }
+      .disabled-add-card:hover { transform: translateY(-2px); background: rgba(255,255,255,.62); border-color: rgba(91,141,239,.62); color: var(--blue2); }
+      .modal-input { width: 100%; border: 1px solid rgba(154,169,184,.32); border-radius: 14px; padding: 12px 14px; font: inherit; color: var(--text); outline: none; margin-bottom: 18px; }
+      .modal-input:focus { border-color: rgba(91,141,239,.7); box-shadow: 0 0 0 3px rgba(91,141,239,.12); }
+      @keyframes panel-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes item-in { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+      @keyframes hero-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes count-pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: scale(1); } }
+      @keyframes card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; }
+      }
+
+      .empty { display: flex; align-items: center; justify-content: center; min-height: 320px; color: var(--muted); text-align: center; }
+      .modal { display: none; position: fixed; inset: 0; background: rgba(20,33,61,.35); backdrop-filter: blur(5px); z-index: 10; align-items: center; justify-content: center; }
+      .modal-box { width: min(420px, 90vw); background: #fff; border-radius: 22px; padding: 28px; box-shadow: 0 22px 60px rgba(20,33,61,.25); }
+      .modal-box h3 { margin-bottom: 10px; }
+      .modal-box p { color: var(--muted); margin-bottom: 22px; }
+      .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+      @media (max-width: 760px) {
+        body { overflow: auto; }
+        .app { min-height: 100vh; height: auto; padding: 16px 12px 20px; gap: 14px; }
+        .top { justify-content: flex-start; padding-right: 0; flex-wrap: wrap; gap: 12px; }
+        .top h1 { width: 100%; text-align: center; font-size: 26px; }
+        .top-actions { position: static; width: 100%; justify-content: center; }
+        .btn { padding: 8px 14px; font-size: 13px; }
+        .layout { display: flex; flex-direction: column; gap: 14px; min-height: auto; }
+        .panel { border-radius: 22px; }
+        .sidebar { max-height: none; }
+        .side-head { padding: 16px 14px 10px; }
+        .side-head h2 { font-size: 17px; margin-bottom: 8px; }
+        .groups { padding: 8px 24px 14px; overflow: visible; }
+        .groups li:not(.section) { min-height: 78px; margin-top: 0 !important; padding: 13px 20px; border-radius: 20px; gap: 12px; }
+        .groups li + li { margin-top: 0; }
+        .groups li:not(.section):not(:last-child) { border-bottom: 1px solid rgba(154,169,184,.18); border-radius: 0; }
+        .groups li:not(.section).active { border-radius: 22px; }
+        .group-name { font-size: 15px; }
+        .group-meta { margin-top: 6px; font-size: 13px; }
+        .spark { width: 128px; height: 48px; }
+        .content { padding: 18px 14px; overflow: visible; }
+        .detail-head { align-items: center; }
+        .title-block { padding-left: 0; text-align: left; min-width: 0; }
+        .title-block h2 { font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        #deleteScope { position: static; }
+        .hero { margin: 18px 0 20px; }
+        .hero-count { font-size: 38px; }
+        .hero-sub { font-size: 14px; }
+        .grid { grid-template-columns: 1fr; gap: 12px; }
+        .meme-card { min-height: 76px; padding: 14px 16px 12px 28px; border-radius: 18px; }
+        .delete-one { opacity: 1; }
+      }
+
+      @media (max-width: 390px) {
+        .app { padding-left: 8px; padding-right: 8px; }
+        .groups { padding-left: 14px; padding-right: 14px; }
+        .groups li:not(.section) { padding: 12px 16px; min-height: 72px; }
+        .group-name { font-size: 15px; }
+        .group-meta { font-size: 13px; }
+        .spark { width: 112px; height: 42px; }
+        .detail-head { flex-direction: column; align-items: stretch; }
+        .title-block { text-align: center; }
+        #deleteScope { align-self: center; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <h1>表情管理</h1>
+        <div class="top-actions">
+          <button id="refresh" class="btn">刷新</button>
+          <button id="reset" class="btn danger">清空全部</button>
+        </div>
+      </header>
+      <main class="layout">
+        <aside class="panel sidebar">
+          <div class="side-head">
+            <h2>选择范围</h2>
+          </div>
+          <ul id="groups" class="groups"></ul>
+        </aside>
+        <section class="panel content">
+          <div id="detail"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="modal" class="modal">
+      <div class="modal-box">
+        <h3 id="modal-title">确认操作</h3>
+        <p id="modal-message"></p>
+        <input id="modal-input" class="modal-input" type="text" style="display:none" />
+        <div class="modal-actions">
+          <button id="modal-cancel" class="btn">取消</button>
+          <button id="modal-confirm" class="btn danger">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      const bridge = window.AstrBotPluginPage;
+      const groupsEl = document.getElementById('groups');
+      const detailEl = document.getElementById('detail');
+      let stats = { global: {}, groups: {}, group_names: {} };
+      let disabledData = { global: { count: 0, items: [] }, groups: {}, group_names: {} };
+      let selected = 'stats:global';
+      const expandedSections = { stats: true, disabled: true };
+      let pendingAction = null;
+
+      function unwrap(response) { return response && response.data ? response.data : response; }
+      async function apiPost(path, params = {}) {
+        const response = bridge.apiPost
+          ? await bridge.apiPost(path, params)
+          : bridge.apiRequest
+            ? await bridge.apiRequest(path, { method: 'POST', data: params })
+            : null;
+        if (!response) throw new Error('AstrBotPluginPage bridge 不支持 POST 请求');
+        const data = unwrap(response);
+        if (data && data.success === false) throw new Error(data.message || '操作失败');
+        return data;
+      }
+      function bucketTotal(bucket) { return Object.values(bucket || {}).reduce((sum, item) => sum + (Number(item.count) || 0), 0); }
+      function entries(bucket) { return Object.entries(bucket || {}).sort((a, b) => (Number(b[1].count) || 0) - (Number(a[1].count) || 0)); }
+      function selectedMode() { return selected.startsWith('disabled:') ? 'disabled' : 'stats'; }
+      function selectedScope() { return selected.split(':', 2)[1] || 'global'; }
+      function makeSelected(mode, scope) { return `${mode}:${scope}`; }
+      function groupName(id, mode = selectedMode()) {
+        const names = mode === 'disabled' ? disabledData.group_names : stats.group_names;
+        return (names && names[id]) || `群 ${id}`;
+      }
+      function selectedBucket() {
+        const scope = selectedScope();
+        return scope === 'global' ? stats.global : (stats.groups || {})[scope] || {};
+      }
+      function selectedTitle() { return selectedScope() === 'global' ? '总表情统计' : groupName(selectedScope(), 'stats'); }
+      function maxCount(list) { return Math.max(1, ...list.map(([, item]) => Number(item.count) || 0)); }
+      function esc(value) {
+        return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
+      }
+
+      function miniSpark(list) {
+        const values = list.slice(0, 8).map(([, item]) => Number(item.count) || 0);
+        if (!values.length) return '';
+        const max = Math.max(1, ...values), w = 110, h = 38;
+        const points = values.map((v, i) => `${(i / Math.max(1, values.length - 1) * w).toFixed(1)},${(h - v / max * 29 - 4).toFixed(1)}`).join(' ');
+        const fillPoints = `0,${h} ${points} ${w},${h}`;
+        const fillId = `spark-fill-${Math.random().toString(36).slice(2)}`;
+        const lineId = `spark-line-${Math.random().toString(36).slice(2)}`;
+        const fadeId = `spark-fade-${Math.random().toString(36).slice(2)}`;
+        const maskId = `spark-mask-${Math.random().toString(36).slice(2)}`;
+        return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="${fillId}" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#72a2f4" stop-opacity="0"/>
+              <stop offset="18%" stop-color="#72a2f4" stop-opacity="0.08"/>
+              <stop offset="38%" stop-color="#72a2f4" stop-opacity="0.22"/>
+              <stop offset="64%" stop-color="#72a2f4" stop-opacity="0.36"/>
+              <stop offset="100%" stop-color="#72a2f4" stop-opacity="0.42"/>
+            </linearGradient>
+            <linearGradient id="${lineId}" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#bcd5ff"/>
+              <stop offset="45%" stop-color="#8fb8f6"/>
+              <stop offset="100%" stop-color="#72a2f4"/>
+            </linearGradient>
+            <linearGradient id="${fadeId}" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="white" stop-opacity="0"/>
+              <stop offset="18%" stop-color="white" stop-opacity="0.08"/>
+              <stop offset="38%" stop-color="white" stop-opacity="0.45"/>
+              <stop offset="64%" stop-color="white" stop-opacity="0.88"/>
+              <stop offset="100%" stop-color="white" stop-opacity="1"/>
+            </linearGradient>
+            <mask id="${maskId}"><rect width="${w}" height="${h}" fill="url(#${fadeId})"/></mask>
+          </defs>
+          <g mask="url(#${maskId})">
+            <polygon class="spark-fill-shape" fill="url(#${fillId})" points="${fillPoints}"/>
+            <polyline class="spark-line-shape" pathLength="1" fill="none" stroke="url(#${lineId})" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${points}"/>
+          </g>
+        </svg>`;
+      }
+
+      function renderSection(key, title, count, content) {
+        const active = selectedMode() === key;
+        return `<li class="section">
+          <button class="section-toggle ${active ? 'active' : ''}" data-section="${key}">
+            <span>${title}</span><span class="chevron">${count} · ${expandedSections[key] ? '收起' : '展开'}</span>
+          </button>
+          <ul class="section-items ${expandedSections[key] ? '' : 'collapsed'}">${content}</ul>
+        </li>`;
+      }
+
+      function renderStatsItems() {
+        const groupEntries = Object.entries(stats.groups || {})
+          .map(([id, bucket]) => [id, bucket, bucketTotal(bucket), entries(bucket)])
+          .filter(([, , total]) => total > 0)
+          .sort((a, b) => b[2] - a[2]);
+        const globalTotal = bucketTotal(stats.global);
+        return `
+          <li class="${selected === 'stats:global' ? 'active' : ''}" data-mode="stats" data-id="global">
+            <div class="group-info"><div class="group-name">总表情统计</div><div class="group-meta">${globalTotal} 次 · ${entries(stats.global).length} 个表情</div></div>
+            ${miniSpark(entries(stats.global))}
+          </li>
+          ${groupEntries.map(([id, , total, list]) => `
+            <li class="${selected === makeSelected('stats', id) ? 'active' : ''}" data-mode="stats" data-id="${esc(id)}">
+              <div class="group-info"><div class="group-name">${esc(groupName(id, 'stats'))}</div><div class="group-meta">${total} 次 · ${list.length} 个表情</div></div>
+              ${miniSpark(list)}
+            </li>
+          `).join('')}
+        `;
+      }
+
+      function renderDisabledItems() {
+        const groupEntries = Object.entries(disabledData.groups || {})
+          .map(([id, data]) => [id, data, Number(data.count) || 0])
+          .filter(([, , count]) => count > 0)
+          .sort((a, b) => b[2] - a[2]);
+        const globalCount = Number((disabledData.global || {}).count) || 0;
+        return `
+          <li class="${selected === 'disabled:global' ? 'active' : ''}" data-mode="disabled" data-id="global">
+            <div class="group-info"><div class="group-name">全局屏蔽</div><div class="group-meta">${globalCount} 个表情</div></div>
+          </li>
+          ${groupEntries.map(([id, , count]) => `
+            <li class="${selected === makeSelected('disabled', id) ? 'active' : ''}" data-mode="disabled" data-id="${esc(id)}">
+              <div class="group-info"><div class="group-name">${esc(groupName(id, 'disabled'))}</div><div class="group-meta">${count} 个表情 · ID: ${esc(id)}</div></div>
+            </li>
+          `).join('')}
+        `;
+      }
+
+      function renderSidebar() {
+        groupsEl.innerHTML = `
+          ${renderSection('stats', '调用统计', bucketTotal(stats.global), renderStatsItems())}
+          ${renderSection('disabled', '屏蔽列表', Number((disabledData.global || {}).count) || 0, renderDisabledItems())}
+        `;
+        groupsEl.querySelectorAll('.section-toggle').forEach(btn => {
+          btn.onclick = () => { expandedSections[btn.dataset.section] = !expandedSections[btn.dataset.section]; renderSidebar(); };
+        });
+        groupsEl.querySelectorAll('li[data-mode][data-id]').forEach(li => {
+          li.onclick = () => { selected = makeSelected(li.dataset.mode, li.dataset.id); renderSidebar(); renderDetail(); };
+        });
+      }
+
+      function renderDetail() {
+        if (selectedMode() === 'disabled') return renderDisabledDetail();
+        const list = entries(selectedBucket());
+        const total = bucketTotal(selectedBucket());
+        const max = maxCount(list);
+        if (!list.length) {
+          detailEl.innerHTML = `<div class="empty">${selectedScope() === 'global' ? '暂无表情调用统计' : '当前群组暂无表情调用统计'}</div>`;
+          return;
+        }
+        detailEl.innerHTML = `
+          <div class="detail-head">
+            <div class="title-block">
+              <h2>${esc(selectedTitle())}</h2>
+            </div>
+            <button id="deleteScope" class="btn danger">删除数据</button>
+          </div>
+          <div class="hero">
+            <div class="hero-count">${total}</div>
+            <div class="hero-sub">表情调用总次数 · 共 ${list.length} 个表情</div>
+            <div class="hero-id">${selectedScope() === 'global' ? '全局统计' : `ID: ${esc(selectedScope())}`}</div>
+          </div>
+          <div class="grid">
+            ${list.map(([key, item], index) => {
+              const count = Number(item.count) || 0;
+              const height = Math.max(18, Math.round(56 * count / max));
+              return `<div class="meme-card">
+                <div class="bar" style="height:${height}px"></div>
+                <button class="delete-one" data-key="${esc(key)}">删除</button>
+                <div class="rank">#${index + 1}</div>
+                <div class="meme-row"><div class="meme-name">${esc(item.name || key)}</div><div class="count">${count} 次</div></div>
+                <div class="meme-key">${esc(key)}</div>
+              </div>`;
+            }).join('')}
+          </div>
+        `;
+        document.getElementById('deleteScope').onclick = () => {
+          showModal('删除统计', `确定要删除 ${selectedTitle()} 的全部统计数据吗？`, async () => {
+            await apiPost('delete', { scope: selectedScope() === 'global' ? 'global' : 'group', group_id: selectedScope(), all: '1', confirm: 'true' });
+            if (selectedScope() !== 'global') selected = 'stats:global';
+            await fetchStats();
+          });
+        };
+        detailEl.querySelectorAll('.delete-one').forEach(btn => {
+          btn.onclick = () => showModal('删除统计', `确定要删除表情 [${btn.dataset.key}] 的统计记录吗？`, async () => {
+            await apiPost('delete', { key: btn.dataset.key, scope: selectedScope() === 'global' ? 'global' : 'group', group_id: selectedScope(), confirm: 'true' });
+            await fetchStats();
+          });
+        });
+      }
+
+      function disabledItems(scope) {
+        if (scope === 'global') return (disabledData.global && disabledData.global.items) || [];
+        return ((disabledData.groups || {})[scope] || {}).items || [];
+      }
+
+      function renderDisabledDetail() {
+        const scope = selectedScope();
+        const list = disabledItems(scope);
+        const title = scope === 'global' ? '全局屏蔽列表' : `${groupName(scope, 'disabled')} 屏蔽列表`;
+        if (!list.length) {
+          detailEl.innerHTML = `
+            <div class="empty" style="flex-direction:column;gap:18px">
+              <div>${scope === 'global' ? '暂无全局屏蔽表情' : '当前群暂无屏蔽表情'}</div>
+              <button id="addDisabled" class="disabled-add-card" title="添加屏蔽表情">+</button>
+            </div>`;
+          document.getElementById('addDisabled').onclick = showAddDisabledModal;
+          return;
+        }
+        detailEl.innerHTML = `
+          <div class="detail-head">
+            <div class="title-block">
+              <h2>${esc(title)}</h2>
+            </div>
+          </div>
+          <div class="hero">
+            <div class="hero-count">${list.length}</div>
+            <div class="hero-sub">已屏蔽表情</div>
+            <div class="hero-id">${scope === 'global' ? '全局屏蔽' : `ID: ${esc(scope)}`}</div>
+          </div>
+          <div class="grid">
+            ${list.map((name, index) => `<div class="meme-card">
+              <div class="bar" style="height:36px;background:var(--danger)"></div>
+              <button class="delete-one" data-name="${esc(name)}">删除</button>
+              <div class="rank">#${index + 1}</div>
+              <div class="meme-row"><div class="meme-name">${esc(name)}</div></div>
+            </div>`).join('')}
+            <button id="addDisabled" class="disabled-add-card" title="添加屏蔽表情">+</button>
+          </div>
+        `;
+        document.getElementById('addDisabled').onclick = showAddDisabledModal;
+        detailEl.querySelectorAll('.delete-one').forEach(btn => {
+          btn.onclick = () => showModal('删除屏蔽', `确定要从 ${title} 删除 “${btn.dataset.name}” 吗？`, async () => {
+            await apiPost('disabled-memes/delete', { name: btn.dataset.name, scope: scope === 'global' ? 'global' : 'group', group_id: scope });
+            await fetchDisabledMemes();
+          });
+        });
+      }
+
+      function showModal(title, message, action, inputOptions = null) {
+        document.getElementById('modal-title').textContent = title;
+        document.getElementById('modal-message').textContent = message;
+        const modal = document.getElementById('modal');
+        const modalInput = document.getElementById('modal-input');
+        const modalConfirm = document.getElementById('modal-confirm');
+        modalConfirm.disabled = false;
+        modalConfirm.textContent = '确定';
+        if (inputOptions) {
+          modalInput.style.display = '';
+          modalInput.value = inputOptions.value || '';
+          modalInput.placeholder = inputOptions.placeholder || '';
+          setTimeout(() => modalInput.focus(), 0);
+        } else {
+          modalInput.style.display = 'none';
+          modalInput.value = '';
+          modalInput.placeholder = '';
+        }
+        modal.style.display = 'flex';
+        pendingAction = action;
+      }
+
+      function hideModal() {
+        const modalInput = document.getElementById('modal-input');
+        const modalConfirm = document.getElementById('modal-confirm');
+        document.getElementById('modal').style.display = 'none';
+        modalInput.style.display = 'none';
+        modalInput.value = '';
+        modalInput.placeholder = '';
+        modalConfirm.disabled = false;
+        modalConfirm.textContent = '确定';
+        pendingAction = null;
+      }
+
+      function splitDisabledNames(value) {
+        return Array.from(new Set(String(value || '')
+          .split(/[\n,，]+/)
+          .map(item => item.trim())
+          .filter(Boolean)));
+      }
+
+      function showAddDisabledModal() {
+        const scope = selectedScope();
+        const isGlobal = scope === 'global';
+        const title = isGlobal ? '全局屏蔽列表' : `${groupName(scope, 'disabled')} 屏蔽列表`;
+        showModal('添加屏蔽表情', `请输入要添加到 ${title} 的表情名、关键词或 key；多个表情请用换行或逗号分隔。`, async () => {
+          const names = splitDisabledNames(document.getElementById('modal-input').value);
+          if (!names.length) return;
+          const failed = [];
+          for (const name of names) {
+            try {
+              await apiPost('disabled-memes/add', { name, scope: isGlobal ? 'global' : 'group', group_id: isGlobal ? '' : scope });
+            } catch (error) {
+              failed.push(error && error.message ? error.message : `${name} 添加失败`);
+            }
+          }
+          await fetchDisabledMemes();
+          if (failed.length) throw new Error(failed.join('；'));
+        }, { placeholder: '例如：摸头，亲亲\n或者每行一个表情' });
+      }
+
+      async function fillMissingGroupNames() {
+        const statsIds = Object.keys(stats.groups || {}).filter(id => !(stats.group_names && stats.group_names[id]));
+        const disabledIds = Object.keys(disabledData.groups || {}).filter(id => !(disabledData.group_names && disabledData.group_names[id]));
+        const ids = Array.from(new Set([...statsIds, ...disabledIds]));
+        if (!ids.length) return;
+        const results = await Promise.all(ids.map(id => bridge.apiGet('group-name', { group_id: id }).catch(() => null)));
+        let changed = false;
+        results.forEach(response => {
+          const data = unwrap(response);
+          if (data && data.group_id && data.group_name) {
+            stats.group_names[data.group_id] = data.group_name;
+            disabledData.group_names[data.group_id] = data.group_name;
+            changed = true;
+          }
+        });
+        if (changed) {
+          renderSidebar();
+          renderDetail();
+        }
+      }
+
+      async function fetchStats() {
+        stats = unwrap(await bridge.apiGet('stats')) || { global: {}, groups: {}, group_names: {} };
+        stats.global ||= {};
+        stats.groups ||= {};
+        stats.group_names ||= {};
+        if (selectedMode() === 'stats' && selectedScope() !== 'global' && !stats.groups[selectedScope()]) selected = 'stats:global';
+        renderSidebar();
+        renderDetail();
+        fillMissingGroupNames();
+      }
+
+      async function fetchDisabledMemes() {
+        disabledData = unwrap(await bridge.apiGet('disabled-memes')) || { global: { count: 0, items: [] }, groups: {}, group_names: {} };
+        disabledData.global ||= { count: 0, items: [] };
+        disabledData.groups ||= {};
+        disabledData.group_names ||= {};
+        if (selectedMode() === 'disabled' && selectedScope() !== 'global' && !disabledData.groups[selectedScope()]) selected = 'disabled:global';
+        renderSidebar();
+        renderDetail();
+        fillMissingGroupNames();
+      }
+
+      async function fetchCurrent() {
+        await Promise.all([fetchStats(), fetchDisabledMemes()]);
+      }
+
+      document.getElementById('refresh').onclick = fetchCurrent;
+      document.getElementById('reset').onclick = () => showModal('清空全部统计', '确定要清空所有表情调用统计吗？此操作无法撤销。', async () => {
+        await apiPost('reset', { confirm: 'true' });
+        selected = 'stats:global';
+        await fetchCurrent();
+      });
+      document.getElementById('modal-cancel').onclick = hideModal;
+      document.getElementById('modal-confirm').onclick = async () => {
+        if (!pendingAction) return hideModal();
+        const modalConfirm = document.getElementById('modal-confirm');
+        const modalMessage = document.getElementById('modal-message');
+        modalConfirm.disabled = true;
+        modalConfirm.textContent = '处理中...';
+        try {
+          await pendingAction();
+          hideModal();
+        } catch (error) {
+          modalMessage.textContent = error && error.message ? error.message : '操作失败';
+          modalConfirm.disabled = false;
+          modalConfirm.textContent = '确定';
+        }
+      };
+      document.getElementById('modal').onclick = e => { if (e.target.id === 'modal') hideModal(); };
+
+      if (!bridge) {
+        detailEl.innerHTML = '<div class="empty">AstrBotPluginPage bridge 不可用，请从 AstrBot 插件页面入口打开。</div>';
+      } else {
+        await bridge.ready();
+        await fetchCurrent();
+      }
+    </script>
+  </body>
+</html>
