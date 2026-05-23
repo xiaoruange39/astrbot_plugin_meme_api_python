@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass
 
+from astrbot.api import logger
+
 
 @dataclass
 class DisabledMemeResult:
@@ -63,6 +65,16 @@ class DisabledMemeManager:
         )
         return emoji_pattern.sub("", text).replace("️", "").replace("‍", "").strip()
 
+    def _save_config(self) -> None:
+        save_config = getattr(self.config, "save_config", None)
+        if not callable(save_config):
+            logger.warning("当前 AstrBot 配置对象不支持 save_config，屏蔽表情列表可能无法持久化")
+            return
+        try:
+            save_config()
+        except Exception as e:
+            logger.error(f"保存屏蔽表情配置失败: {e}")
+
     def _disabled_group_entries(self) -> list[dict]:
         entries = self.config.get("meme_disabled_groups", [])
         return entries if isinstance(entries, list) else []
@@ -87,15 +99,18 @@ class DisabledMemeManager:
                 item["group_id"] = group_id
                 item["keywords"] = keywords
                 self.config["meme_disabled_groups"] = entries
+                self._save_config()
                 return
         entries.append({"__template_key": "disabled_group_item", "group_id": group_id, "keywords": keywords})
         self.config["meme_disabled_groups"] = entries
+        self._save_config()
 
     def _global_keywords(self) -> list[str]:
         return sorted(self.plugin_config.disabled_meme_names())
 
     def _set_global_keywords(self, keywords: list[str]) -> None:
         self.config["meme_disabled_keys"] = keywords
+        self._save_config()
 
     def _scope_keywords(self, group_id: str) -> list[str]:
         return self._group_keywords(group_id) if group_id else self._global_keywords()

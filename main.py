@@ -102,7 +102,7 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.3")
+@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.4")
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1469,7 +1469,8 @@ class MemeUpdater(Star):
             yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
             return
         scope_name = "全局" if force_global else await self._block_scope_name(event, group_id)
-        all_meme_infos = await self.meme_client.fetch_meme_infos()
+        await self._refresh_meme_infos()
+        all_meme_infos = self.meme_infos
         result = self.disabled_memes.disable(group_id, name, all_meme_infos)
         if result.status == "not_found":
             yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
@@ -1493,7 +1494,8 @@ class MemeUpdater(Star):
             yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
             return
         scope_name = "全局" if force_global else await self._block_scope_name(event, group_id)
-        all_meme_infos = await self.meme_client.fetch_meme_infos()
+        await self._refresh_meme_infos()
+        all_meme_infos = self.meme_infos
         result = self.disabled_memes.enable(group_id, name, all_meme_infos)
         if result.status == "not_found":
             yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
@@ -1533,12 +1535,24 @@ class MemeUpdater(Star):
         self._stop_event(event)
         args = self._get_message_args(event, "屏蔽表情列表")
         group_id = self._block_list_scope_from_args(event, args)
+        async for result in self._list_disabled_memes(event, group_id):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局屏蔽表情列表")
+    async def list_global_disabled_memes(self, event: AstrMessageEvent):
+        self._stop_event(event)
+        async for result in self._list_disabled_memes(event, ""):
+            yield result
+
+    async def _list_disabled_memes(self, event: AstrMessageEvent, group_id: str):
         title, scope_name = await self._block_scope_title(event, group_id)
-        keys = sorted(self.plugin_config.disabled_meme_names_for_group(group_id))
+        keys = sorted(self.plugin_config.disabled_meme_names() if not group_id else self.plugin_config.disabled_meme_names_for_group(group_id))
         if not keys:
             yield event.plain_result(f"{scope_name}没有屏蔽任何表情。")
             return
-        all_meme_infos = await self.meme_client.fetch_meme_infos()
+        await self._refresh_meme_infos()
+        all_meme_infos = self.meme_infos
         display_names = self.disabled_memes.disabled_display_names(all_meme_infos, set(keys))
         try:
             image, content_type = await asyncio.to_thread(self.image_renderer.render_disabled_memes, display_names, title)
