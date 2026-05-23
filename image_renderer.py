@@ -30,7 +30,10 @@ class MemeImageRenderer:
 
     def _usage_font_priority(self, filename: str) -> int:
         lower = filename.lower()
-        if any(value in lower for value in ("serif", "song", "simsun", "ming", "kaiti", "fangsong")):
+        if any(
+            value in lower
+            for value in ("serif", "song", "simsun", "ming", "kaiti", "fangsong")
+        ):
             return 100
         groups = [
             ("yahei", "msyh"),
@@ -55,16 +58,22 @@ class MemeImageRenderer:
                 return self._usage_font_candidates
             font_dirs = []
             if platform.system() == "Windows":
-                windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or "C:/Windows"
+                windir = (
+                    os.environ.get("WINDIR")
+                    or os.environ.get("SystemRoot")
+                    or "C:/Windows"
+                )
                 font_dirs.append(os.path.join(windir, "Fonts"))
             else:
-                font_dirs.extend([
-                    "/usr/share/fonts",
-                    "/usr/local/share/fonts",
-                    os.path.expanduser("~/.local/share/fonts"),
-                    "/System/Library/Fonts",
-                    "/Library/Fonts",
-                ])
+                font_dirs.extend(
+                    [
+                        "/usr/share/fonts",
+                        "/usr/local/share/fonts",
+                        os.path.expanduser("~/.local/share/fonts"),
+                        "/System/Library/Fonts",
+                        "/Library/Fonts",
+                    ]
+                )
             candidates = []
             for font_dir in font_dirs:
                 if not os.path.isdir(font_dir):
@@ -73,7 +82,12 @@ class MemeImageRenderer:
                     for name in files:
                         lower = name.lower()
                         if lower.endswith((".ttf", ".ttc", ".otf")):
-                            candidates.append((self._usage_font_priority(name), os.path.join(root, name)))
+                            candidates.append(
+                                (
+                                    self._usage_font_priority(name),
+                                    os.path.join(root, name),
+                                )
+                            )
             self._usage_font_candidates = sorted(candidates, key=lambda item: item[0])
             return self._usage_font_candidates
 
@@ -110,7 +124,15 @@ class MemeImageRenderer:
             self._usage_font_cache[size] = font
         return font
 
-    def _draw_usage_text(self, draw, xy: tuple[int, int], text: str, font, fill: str, max_width: int | None = None) -> None:
+    def _draw_usage_text(
+        self,
+        draw,
+        xy: tuple[int, int],
+        text: str,
+        font,
+        fill: str,
+        max_width: int | None = None,
+    ) -> None:
         if not max_width:
             draw.text(xy, text, font=font, fill=fill)
             return
@@ -123,7 +145,9 @@ class MemeImageRenderer:
         box = draw.textbbox((0, 0), text, font=font)
         return box[2] - box[0], box[3] - box[1]
 
-    def _draw_centered_text(self, draw, box: tuple[int, int, int, int], text: str, font, fill: str) -> None:
+    def _draw_centered_text(
+        self, draw, box: tuple[int, int, int, int], text: str, font, fill: str
+    ) -> None:
         text_box = draw.textbbox((0, 0), text, font=font)
         text_w = text_box[2] - text_box[0]
         text_h = text_box[3] - text_box[1]
@@ -132,24 +156,50 @@ class MemeImageRenderer:
         y = y1 + (y2 - y1 - text_h) / 2 - text_box[1]
         draw.text((x, y), text, font=font, fill=fill)
 
-    def _vertical_gradient(self, width: int, height: int, top: tuple[int, int, int], bottom: tuple[int, int, int]):
+    def _vertical_gradient(
+        self,
+        width: int,
+        height: int,
+        top: tuple[int, int, int],
+        bottom: tuple[int, int, int],
+    ):
         if height <= 1:
             return Image.new("RGB", (width, height), top)
-        rows = [tuple(int(top[i] * (1 - y / (height - 1)) + bottom[i] * (y / (height - 1))) for i in range(3)) for y in range(height)]
+        rows = [
+            tuple(
+                int(top[i] * (1 - y / (height - 1)) + bottom[i] * (y / (height - 1)))
+                for i in range(3)
+            )
+            for y in range(height)
+        ]
         image = Image.new("RGB", (1, height))
         image.putdata(rows)
         return image.resize((width, height))
 
-    def _draw_soft_circle(self, image, center: tuple[int, int], radius: int, color: tuple[int, int, int, int]) -> None:
+    def _draw_soft_circle(
+        self,
+        image,
+        center: tuple[int, int],
+        radius: int,
+        color: tuple[int, int, int, int],
+    ) -> None:
         overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         cx, cy = center
         for step in range(radius, 0, -8):
             alpha = int(color[3] * (1 - step / radius) ** 2)
-            draw.ellipse((cx - step, cy - step, cx + step, cy + step), fill=(*color[:3], alpha))
+            draw.ellipse(
+                (cx - step, cy - step, cx + step, cy + step), fill=(*color[:3], alpha)
+            )
         image.alpha_composite(overlay)
 
-    def render_meme_usage_stats(self, rows: list[tuple[str, int]], scope: str = "global", group_id: str = "", title_override: str = None) -> tuple[bytes, str]:
+    def render_meme_usage_stats(
+        self,
+        rows: list[tuple[str, int]],
+        scope: str = "global",
+        group_id: str = "",
+        title_override: str = None,
+    ) -> tuple[bytes, str]:
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow 不可用")
         scale = 2
@@ -157,14 +207,22 @@ class MemeImageRenderer:
         card_w, card_h = 250 * scale, 82 * scale
         gap_x, gap_y = 22 * scale, 20 * scale
         margin_x, top_h, bottom = 58 * scale, 178 * scale, 58 * scale
-        shown_rows = rows[:self.usage_stats.limit()]
+        shown_rows = rows[: self.usage_stats.limit()]
         row_count = max(1, (len(shown_rows) + columns - 1) // columns)
         width = margin_x * 2 + columns * card_w + (columns - 1) * gap_x
         height = top_h + row_count * card_h + (row_count - 1) * gap_y + bottom
-        image = self._vertical_gradient(width, height, (248, 251, 255), (239, 245, 252)).convert("RGBA")
-        self._draw_soft_circle(image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70))
-        self._draw_soft_circle(image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62))
-        self._draw_soft_circle(image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52))
+        image = self._vertical_gradient(
+            width, height, (248, 251, 255), (239, 245, 252)
+        ).convert("RGBA")
+        self._draw_soft_circle(
+            image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70)
+        )
+        self._draw_soft_circle(
+            image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62)
+        )
+        self._draw_soft_circle(
+            image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52)
+        )
         draw = ImageDraw.Draw(image)
         title_font = self._load_usage_font(42 * scale)
         subtitle_font = self._load_usage_font(20 * scale)
@@ -173,12 +231,28 @@ class MemeImageRenderer:
         count_font = self._load_usage_font(17 * scale)
         title = title_override or self.usage_stats.title()
         title_box = draw.textbbox((0, 0), title, font=title_font)
-        draw.text(((width - (title_box[2] - title_box[0])) // 2, 42 * scale), title, font=title_font, fill="#14213d")
+        draw.text(
+            ((width - (title_box[2] - title_box[0])) // 2, 42 * scale),
+            title,
+            font=title_font,
+            fill="#14213d",
+        )
         total = sum(count for _, count in self.usage_stats.rows(10**9, scope, group_id))
         subtitle = f"表情调用总次数 · {total}"
         subtitle_w, _ = self._text_size(draw, subtitle, subtitle_font)
-        pill_box = ((width - subtitle_w - 52 * scale) // 2, 103 * scale, (width + subtitle_w + 52 * scale) // 2, 143 * scale)
-        draw.rounded_rectangle(pill_box, radius=20 * scale, fill=(255, 255, 255, 178), outline=(255, 255, 255, 230), width=scale)
+        pill_box = (
+            (width - subtitle_w - 52 * scale) // 2,
+            103 * scale,
+            (width + subtitle_w + 52 * scale) // 2,
+            143 * scale,
+        )
+        draw.rounded_rectangle(
+            pill_box,
+            radius=20 * scale,
+            fill=(255, 255, 255, 178),
+            outline=(255, 255, 255, 230),
+            width=scale,
+        )
         self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
         max_count = max((count for _, count in shown_rows), default=1)
         for index, (key, count) in enumerate(shown_rows):
@@ -187,26 +261,66 @@ class MemeImageRenderer:
             y = top_h + row * (card_h + gap_y)
             shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
             shadow_draw = ImageDraw.Draw(shadow)
-            shadow_draw.rounded_rectangle((x + 3 * scale, y + 5 * scale, x + card_w + 3 * scale, y + card_h + 5 * scale), radius=20 * scale, fill=(48, 72, 102, 22))
+            shadow_draw.rounded_rectangle(
+                (
+                    x + 3 * scale,
+                    y + 5 * scale,
+                    x + card_w + 3 * scale,
+                    y + card_h + 5 * scale,
+                ),
+                radius=20 * scale,
+                fill=(48, 72, 102, 22),
+            )
             image.alpha_composite(shadow)
-            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=20 * scale, fill=(255, 255, 255, 218), outline=(255, 255, 255, 245), width=scale)
+            draw.rounded_rectangle(
+                (x, y, x + card_w, y + card_h),
+                radius=20 * scale,
+                fill=(255, 255, 255, 218),
+                outline=(255, 255, 255, 245),
+                width=scale,
+            )
             accent_h = max(18 * scale, int((card_h - 26 * scale) * count / max_count))
-            draw.rounded_rectangle((x + 14 * scale, y + card_h - 13 * scale - accent_h, x + 19 * scale, y + card_h - 13 * scale), radius=3 * scale, fill="#5b8def")
+            draw.rounded_rectangle(
+                (
+                    x + 14 * scale,
+                    y + card_h - 13 * scale - accent_h,
+                    x + 19 * scale,
+                    y + card_h - 13 * scale,
+                ),
+                radius=3 * scale,
+                fill="#5b8def",
+            )
             rank = f"#{index + 1}"
-            draw.text((x + 30 * scale, y + 16 * scale), rank, font=rank_font, fill="#9aa9b8")
-            self._draw_usage_text(draw, (x + 30 * scale, y + 40 * scale), self.usage_stats.display_name(key, scope, group_id), name_font, "#1f2d3d", card_w - 112 * scale)
+            draw.text(
+                (x + 30 * scale, y + 16 * scale), rank, font=rank_font, fill="#9aa9b8"
+            )
+            self._draw_usage_text(
+                draw,
+                (x + 30 * scale, y + 40 * scale),
+                self.usage_stats.display_name(key, scope, group_id),
+                name_font,
+                "#1f2d3d",
+                card_w - 112 * scale,
+            )
             count_text = f"{count} 次"
             count_box = draw.textbbox((0, 0), count_text, font=count_font)
             count_w = count_box[2] - count_box[0]
             badge_x = x + card_w - count_w - 34 * scale
-            badge_box = (badge_x, y + 26 * scale, x + card_w - 18 * scale, y + 58 * scale)
+            badge_box = (
+                badge_x,
+                y + 26 * scale,
+                x + card_w - 18 * scale,
+                y + 58 * scale,
+            )
             draw.rounded_rectangle(badge_box, radius=16 * scale, fill="#eef5ff")
             self._draw_centered_text(draw, badge_box, count_text, count_font, "#3f78c8")
         output = io.BytesIO()
         image.convert("RGB").save(output, format="PNG")
         return output.getvalue(), "image/png"
 
-    def render_disabled_memes(self, names: list[str], title: str = "屏蔽表情列表") -> tuple[bytes, str]:
+    def render_disabled_memes(
+        self, names: list[str], title: str = "屏蔽表情列表"
+    ) -> tuple[bytes, str]:
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow 不可用")
         scale = 2
@@ -217,21 +331,45 @@ class MemeImageRenderer:
         row_count = max(1, (len(names) + columns - 1) // columns) if names else 1
         width = margin_x * 2 + columns * card_w + (columns - 1) * gap_x
         height = top_h + row_count * card_h + (row_count - 1) * gap_y + bottom
-        image = self._vertical_gradient(width, height, (248, 251, 255), (239, 245, 252)).convert("RGBA")
-        self._draw_soft_circle(image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70))
-        self._draw_soft_circle(image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62))
-        self._draw_soft_circle(image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52))
+        image = self._vertical_gradient(
+            width, height, (248, 251, 255), (239, 245, 252)
+        ).convert("RGBA")
+        self._draw_soft_circle(
+            image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70)
+        )
+        self._draw_soft_circle(
+            image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62)
+        )
+        self._draw_soft_circle(
+            image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52)
+        )
         draw = ImageDraw.Draw(image)
         title_font = self._load_usage_font(42 * scale)
         subtitle_font = self._load_usage_font(20 * scale)
         name_font = self._load_usage_font(21 * scale)
         rank_font = self._load_usage_font(14 * scale)
         title_box = draw.textbbox((0, 0), title, font=title_font)
-        draw.text(((width - (title_box[2] - title_box[0])) // 2, 42 * scale), title, font=title_font, fill="#14213d")
+        draw.text(
+            ((width - (title_box[2] - title_box[0])) // 2, 42 * scale),
+            title,
+            font=title_font,
+            fill="#14213d",
+        )
         subtitle = f"已屏蔽 {len(names)} 个表情"
         subtitle_w, _ = self._text_size(draw, subtitle, subtitle_font)
-        pill_box = ((width - subtitle_w - 52 * scale) // 2, 103 * scale, (width + subtitle_w + 52 * scale) // 2, 143 * scale)
-        draw.rounded_rectangle(pill_box, radius=20 * scale, fill=(255, 255, 255, 178), outline=(255, 255, 255, 230), width=scale)
+        pill_box = (
+            (width - subtitle_w - 52 * scale) // 2,
+            103 * scale,
+            (width + subtitle_w + 52 * scale) // 2,
+            143 * scale,
+        )
+        draw.rounded_rectangle(
+            pill_box,
+            radius=20 * scale,
+            fill=(255, 255, 255, 178),
+            outline=(255, 255, 255, 230),
+            width=scale,
+        )
         self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
         for index, name in enumerate(names):
             row, col = divmod(index, columns)
@@ -239,14 +377,47 @@ class MemeImageRenderer:
             y = top_h + row * (card_h + gap_y)
             shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
             shadow_draw = ImageDraw.Draw(shadow)
-            shadow_draw.rounded_rectangle((x + 3 * scale, y + 5 * scale, x + card_w + 3 * scale, y + card_h + 5 * scale), radius=20 * scale, fill=(48, 72, 102, 22))
+            shadow_draw.rounded_rectangle(
+                (
+                    x + 3 * scale,
+                    y + 5 * scale,
+                    x + card_w + 3 * scale,
+                    y + card_h + 5 * scale,
+                ),
+                radius=20 * scale,
+                fill=(48, 72, 102, 22),
+            )
             image.alpha_composite(shadow)
-            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=20 * scale, fill=(255, 255, 255, 218), outline=(255, 255, 255, 245), width=scale)
-            draw.rounded_rectangle((x + 14 * scale, y + 16 * scale, x + 19 * scale, y + card_h - 16 * scale), radius=3 * scale, fill="#ef4444")
+            draw.rounded_rectangle(
+                (x, y, x + card_w, y + card_h),
+                radius=20 * scale,
+                fill=(255, 255, 255, 218),
+                outline=(255, 255, 255, 245),
+                width=scale,
+            )
+            draw.rounded_rectangle(
+                (
+                    x + 14 * scale,
+                    y + 16 * scale,
+                    x + 19 * scale,
+                    y + card_h - 16 * scale,
+                ),
+                radius=3 * scale,
+                fill="#ef4444",
+            )
             rank = f"#{index + 1}"
-            draw.text((x + 30 * scale, y + 14 * scale), rank, font=rank_font, fill="#9aa9b8")
+            draw.text(
+                (x + 30 * scale, y + 14 * scale), rank, font=rank_font, fill="#9aa9b8"
+            )
             clean_name = self.remove_emoji(name)
-            self._draw_usage_text(draw, (x + 30 * scale, y + 34 * scale), clean_name, name_font, "#1f2d3d", card_w - 50 * scale)
+            self._draw_usage_text(
+                draw,
+                (x + 30 * scale, y + 34 * scale),
+                clean_name,
+                name_font,
+                "#1f2d3d",
+                card_w - 50 * scale,
+            )
         output = io.BytesIO()
         image.convert("RGB").save(output, format="PNG")
         return output.getvalue(), "image/png"

@@ -6,8 +6,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from quart import jsonify, request
-from astrbot.api import logger
 
+from astrbot.api import logger
 
 JSON_HEADERS = {"Content-Type": "application/json; charset=utf-8"}
 
@@ -67,11 +67,14 @@ class MemeUsageStats:
             return 100
 
     def title(self) -> str:
-        return str(self.config.get("meme_usage_stats_title", "表情调用统计")).strip() or "表情调用统计"
+        return (
+            str(self.config.get("meme_usage_stats_title", "表情调用统计")).strip()
+            or "表情调用统计"
+        )
 
     def load(self) -> dict[str, dict]:
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             return data if isinstance(data, dict) else {}
         except FileNotFoundError:
@@ -82,10 +85,20 @@ class MemeUsageStats:
 
     def normalize(self, data: dict) -> dict:
         if "global" in data or "groups" in data:
-            global_usage = data.get("global") if isinstance(data.get("global"), dict) else {}
+            global_usage = (
+                data.get("global") if isinstance(data.get("global"), dict) else {}
+            )
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-            group_names = data.get("group_names") if isinstance(data.get("group_names"), dict) else {}
-            return {"global": global_usage, "groups": groups, "group_names": group_names}
+            group_names = (
+                data.get("group_names")
+                if isinstance(data.get("group_names"), dict)
+                else {}
+            )
+            return {
+                "global": global_usage,
+                "groups": groups,
+                "group_names": group_names,
+            }
         return {"global": data, "groups": {}, "group_names": {}}
 
     def bucket(self, data: dict, scope: str, group_id: str = "") -> dict:
@@ -113,7 +126,9 @@ class MemeUsageStats:
         try:
             data = self.load()
             normalized = self.normalize(data)
-            logger.info(f"Plugin Page 请求统计数据，当前记录数: {len(normalized.get('global', {}))}")
+            logger.info(
+                f"Plugin Page 请求统计数据，当前记录数: {len(normalized.get('global', {}))}"
+            )
             return json.dumps(normalized, ensure_ascii=False), 200, JSON_HEADERS
         except Exception as e:
             logger.error(f"Plugin Page 获取统计失败: {e}")
@@ -139,16 +154,36 @@ class MemeUsageStats:
     async def web_reset_stats(self):
         params = await self._mutation_params()
         if not self._confirmed(params):
-            return json.dumps({"success": False, "message": "请提供 confirm=true 确认清空统计数据"}, ensure_ascii=False), 400, JSON_HEADERS
+            return (
+                json.dumps(
+                    {
+                        "success": False,
+                        "message": "请提供 confirm=true 确认清空统计数据",
+                    },
+                    ensure_ascii=False,
+                ),
+                400,
+                JSON_HEADERS,
+            )
         async with self.lock:
             self.save({"global": {}, "groups": {}, "group_names": {}})
-        return json.dumps({"success": True, "message": "统计数据已清空"}, ensure_ascii=False), 200, JSON_HEADERS
+        return (
+            json.dumps(
+                {"success": True, "message": "统计数据已清空"}, ensure_ascii=False
+            ),
+            200,
+            JSON_HEADERS,
+        )
 
     async def web_get_group_name(self):
         try:
             group_id = str(request.args.get("group_id", "")).strip()
             if not group_id:
-                return json.dumps({"success": False, "message": "未提供 group_id"}), 400, JSON_HEADERS
+                return (
+                    json.dumps({"success": False, "message": "未提供 group_id"}),
+                    400,
+                    JSON_HEADERS,
+                )
             data = self.normalize(self.load())
             cached_name = str(data.get("group_names", {}).get(group_id) or "").strip()
             group_name = cached_name
@@ -157,7 +192,18 @@ class MemeUsageStats:
                     data = self.normalize(self.load())
                     data.setdefault("group_names", {})[group_id] = group_name
                     self.save(data)
-            return json.dumps({"success": True, "group_id": group_id, "group_name": group_name or ""}, ensure_ascii=False), 200, JSON_HEADERS
+            return (
+                json.dumps(
+                    {
+                        "success": True,
+                        "group_id": group_id,
+                        "group_name": group_name or "",
+                    },
+                    ensure_ascii=False,
+                ),
+                200,
+                JSON_HEADERS,
+            )
         except Exception as e:
             return json.dumps({"success": False, "message": str(e)}), 500, JSON_HEADERS
 
@@ -165,7 +211,17 @@ class MemeUsageStats:
         try:
             args = await self._mutation_params()
             if not self._confirmed(args):
-                return json.dumps({"success": False, "message": "请提供 confirm=true 确认删除统计数据"}, ensure_ascii=False), 400, JSON_HEADERS
+                return (
+                    json.dumps(
+                        {
+                            "success": False,
+                            "message": "请提供 confirm=true 确认删除统计数据",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    400,
+                    JSON_HEADERS,
+                )
             key = args.get("key", "")
             scope = args.get("scope", "global")
             group_id = args.get("group_id", "")
@@ -179,10 +235,18 @@ class MemeUsageStats:
                     elif scope == "group" and group_id in data["groups"]:
                         del data["groups"][group_id]
                     self.save(data)
-                    return json.dumps({"success": True, "message": "统计数据已删除"}), 200, JSON_HEADERS
+                    return (
+                        json.dumps({"success": True, "message": "统计数据已删除"}),
+                        200,
+                        JSON_HEADERS,
+                    )
 
                 if not key:
-                    return json.dumps({"success": False, "message": "未提供 meme key"}), 400, JSON_HEADERS
+                    return (
+                        json.dumps({"success": False, "message": "未提供 meme key"}),
+                        400,
+                        JSON_HEADERS,
+                    )
 
                 if scope == "global":
                     if key in data["global"]:
@@ -193,7 +257,11 @@ class MemeUsageStats:
 
                 self.save(data)
 
-            return json.dumps({"success": True, "message": f"记录 {key} 已删除"}), 200, JSON_HEADERS
+            return (
+                json.dumps({"success": True, "message": f"记录 {key} 已删除"}),
+                200,
+                JSON_HEADERS,
+            )
         except Exception as e:
             return json.dumps({"success": False, "message": str(e)}), 500, JSON_HEADERS
 
@@ -213,13 +281,17 @@ class MemeUsageStats:
         group_id = self._group_id(event)
         group_name = ""
         if group_id:
-            group_name = self._group_name_from_event(event, group_id) or await self._lookup_group_name(event, group_id)
+            group_name = self._group_name_from_event(
+                event, group_id
+            ) or await self._lookup_group_name(event, group_id)
         async with self.lock:
             data = self.normalize(self.load())
             now = int(time.time())
             self.increment_item(self.bucket(data, "global"), key, info, now)
             if group_id:
-                self.increment_item(self.bucket(data, "group", group_id), key, info, now)
+                self.increment_item(
+                    self.bucket(data, "group", group_id), key, info, now
+                )
                 if group_name:
                     data.setdefault("group_names", {})[group_id] = group_name
             self.save(data)
@@ -237,7 +309,9 @@ class MemeUsageStats:
                 return name
         return key
 
-    def rows(self, limit: int | None = None, scope: str = "global", group_id: str = "") -> list[tuple[str, int]]:
+    def rows(
+        self, limit: int | None = None, scope: str = "global", group_id: str = ""
+    ) -> list[tuple[str, int]]:
         data = self.load()
         bucket = self.bucket(data, scope, group_id)
         rows = []
@@ -249,10 +323,15 @@ class MemeUsageStats:
             if count > 0:
                 rows.append((str(key), count))
         rows.sort(key=lambda row: row[1], reverse=True)
-        return rows[:limit or self.limit()]
+        return rows[: limit or self.limit()]
 
-    def format_text(self, rows: list[tuple[str, int]], scope: str = "global", group_id: str = "") -> str:
+    def format_text(
+        self, rows: list[tuple[str, int]], scope: str = "global", group_id: str = ""
+    ) -> str:
         total = sum(count for _, count in self.rows(10**9, scope, group_id))
         lines = [self.title(), f"表情调用总次数：{total}"]
-        lines.extend(f"{index}. {self.display_name(key, scope, group_id)}：{count} 次" for index, (key, count) in enumerate(rows, 1))
+        lines.extend(
+            f"{index}. {self.display_name(key, scope, group_id)}：{count} 次"
+            for index, (key, count) in enumerate(rows, 1)
+        )
         return "\n".join(lines)

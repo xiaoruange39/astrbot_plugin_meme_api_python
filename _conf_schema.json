@@ -90,6 +90,15 @@
     "type": "bool",
     "default": true
   },
+  "meme_group_whitelist": {
+    "description": "群聊白名单",
+    "hint": "填入允许使用表情包功能的群号。留空则代表所有群聊可用。私聊不受此限制。",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
   "meme_poke_random_enabled": {
     "description": "戳一戳发送随机表情",
     "hint": "开启后，用户戳机器人时自动发送一张随机表情包。",
@@ -118,7 +127,12 @@
     "description": "表情列表排序方式",
     "hint": "控制表情列表图片中的排序。",
     "type": "string",
-    "options": ["创建时间", "更新时间", "名称", "关键词"],
+    "options": [
+      "创建时间",
+      "更新时间",
+      "名称",
+      "关键词"
+    ],
     "default": "创建时间"
   },
   "meme_list_sort_reverse": {
@@ -210,7 +224,10 @@
     "description": "远程认证方式",
     "hint": "选择私钥登录或密码登录。",
     "type": "string",
-    "options": ["私钥登录", "密码登录"],
+    "options": [
+      "私钥登录",
+      "密码登录"
+    ],
     "default": "私钥登录"
   },
   "remote_host": {

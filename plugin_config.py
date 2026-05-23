@@ -1,6 +1,6 @@
 import os
-import re
 import posixpath
+import re
 from urllib.parse import urlparse
 
 from astrbot.api import logger
@@ -48,11 +48,18 @@ def has_shell_control_chars(value: str) -> bool:
 
 def is_safe_relative_path(path: str) -> bool:
     parts = path.replace("\\", "/").split("/")
-    return bool(path) and not has_shell_control_chars(path) and not os.path.isabs(path) and ".." not in parts
+    return (
+        bool(path)
+        and not has_shell_control_chars(path)
+        and not os.path.isabs(path)
+        and ".." not in parts
+    )
 
 
 def is_safe_ssh_arg(value: str) -> bool:
-    return bool(value) and not value.startswith("-") and not has_shell_control_chars(value)
+    return (
+        bool(value) and not value.startswith("-") and not has_shell_control_chars(value)
+    )
 
 
 def normalize_remote_path(path: str) -> str:
@@ -85,17 +92,21 @@ class MemePluginConfig:
             clone_subdir = os.path.dirname(data_subdir)
             data_leaf = os.path.basename(data_subdir)
             clone_dir = os.path.join(self.meme_data_dir, clone_subdir)
-            repos.append({
-                "name": spec["name"],
-                "url": spec["url"],
-                "data_subdir": clone_subdir,
-                "data_leaf": data_leaf,
-                "clone_dir": clone_dir,
-                "data_dir": os.path.join(clone_dir, data_leaf),
-            })
+            repos.append(
+                {
+                    "name": spec["name"],
+                    "url": spec["url"],
+                    "data_subdir": clone_subdir,
+                    "data_leaf": data_leaf,
+                    "clone_dir": clone_dir,
+                    "data_dir": os.path.join(clone_dir, data_leaf),
+                }
+            )
         return repos
 
-    def _repo_paths_from_data_dir(self, data_dir: str, base_dir: str) -> tuple[str, str, str] | None:
+    def _repo_paths_from_data_dir(
+        self, data_dir: str, base_dir: str
+    ) -> tuple[str, str, str] | None:
         normalized_data = os.path.normpath(data_dir)
         normalized_base = os.path.normpath(base_dir)
         try:
@@ -103,7 +114,9 @@ class MemePluginConfig:
         except ValueError:
             return None
         if rel_data == "." or rel_data.startswith("..") or os.path.isabs(rel_data):
-            logger.warning(f"表情包数据目录不在工作目录内，已跳过: {data_dir} | 工作目录: {base_dir}")
+            logger.warning(
+                f"表情包数据目录不在工作目录内，已跳过: {data_dir} | 工作目录: {base_dir}"
+            )
             return None
         rel_data = rel_data.replace("\\", "/")
         if not is_safe_relative_path(rel_data):
@@ -122,7 +135,9 @@ class MemePluginConfig:
         if not isinstance(repos, list):
             return default_repos
 
-        base_dir = self.remote_workdir() if self.remote_enabled() else self.local_workdir()
+        base_dir = (
+            self.remote_workdir() if self.remote_enabled() else self.local_workdir()
+        )
         result = []
         for repo in repos:
             if not isinstance(repo, dict):
@@ -131,13 +146,17 @@ class MemePluginConfig:
             if not url or has_shell_control_chars(url) or not is_allowed_repo_url(url):
                 continue
             data_dir = str(repo.get("data_dir") or "").strip()
-            paths = self._repo_paths_from_data_dir(data_dir, base_dir) if data_dir else None
+            paths = (
+                self._repo_paths_from_data_dir(data_dir, base_dir) if data_dir else None
+            )
             if paths:
                 data_subdir, data_leaf, clone_dir = paths
             elif data_dir:
                 continue
             else:
-                data_subdir = str(repo.get("data_subdir") or repo.get("name") or "").strip()
+                data_subdir = str(
+                    repo.get("data_subdir") or repo.get("name") or ""
+                ).strip()
                 if not is_safe_relative_path(data_subdir):
                     continue
                 clone_dir = os.path.join(base_dir, data_subdir)
@@ -145,15 +164,19 @@ class MemePluginConfig:
                 if data_leaf and not is_safe_relative_path(data_leaf):
                     continue
             data_dir = os.path.join(clone_dir, data_leaf) if data_leaf else clone_dir
-            name = os.path.basename(clone_dir) or url.rstrip("/").split("/")[-1].removesuffix(".git")
-            result.append({
-                "name": name,
-                "url": url,
-                "data_subdir": data_subdir,
-                "data_leaf": data_leaf,
-                "clone_dir": clone_dir,
-                "data_dir": data_dir,
-            })
+            name = os.path.basename(clone_dir) or url.rstrip("/").split("/")[
+                -1
+            ].removesuffix(".git")
+            result.append(
+                {
+                    "name": name,
+                    "url": url,
+                    "data_subdir": data_subdir,
+                    "data_leaf": data_leaf,
+                    "clone_dir": clone_dir,
+                    "data_dir": data_dir,
+                }
+            )
         return result or default_repos
 
     def remote_enabled(self) -> bool:
@@ -189,18 +212,28 @@ class MemePluginConfig:
         return self.meme_data_dir if has_shell_control_chars(workdir) else workdir
 
     def remote_workdir(self) -> str:
-        workdir = str(self.config.get("remote_workdir", DEFAULT_MEME_WORKDIR)).strip() or DEFAULT_MEME_WORKDIR
+        workdir = (
+            str(self.config.get("remote_workdir", DEFAULT_MEME_WORKDIR)).strip()
+            or DEFAULT_MEME_WORKDIR
+        )
         return self.meme_data_dir if has_shell_control_chars(workdir) else workdir
 
     def docker_container(self) -> str:
-        container = str(self.config.get("docker_container", SCREEN_SESSION)).strip() or SCREEN_SESSION
+        container = (
+            str(self.config.get("docker_container", SCREEN_SESSION)).strip()
+            or SCREEN_SESSION
+        )
         return SCREEN_SESSION if has_shell_control_chars(container) else container
 
     def repo_update_enabled(self) -> bool:
         return bool(self.config.get("repo_update_enabled", False))
 
     def meme_api_base_url(self) -> str:
-        value = str(self.config.get("meme_api_base_url", "http://127.0.0.1:2233")).strip().rstrip("/")
+        value = (
+            str(self.config.get("meme_api_base_url", "http://127.0.0.1:2233"))
+            .strip()
+            .rstrip("/")
+        )
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return "http://127.0.0.1:2233"
@@ -236,6 +269,11 @@ class MemePluginConfig:
 
     def meme_poke_random_enabled(self) -> bool:
         return bool(self.config.get("meme_poke_random_enabled", False))
+
+    def meme_group_whitelist(self) -> list[str]:
+        return [
+            str(v).strip() for v in self.config.get("meme_group_whitelist", []) if v
+        ]
 
     def meme_auto_default_texts(self) -> bool:
         return bool(self.config.get("meme_auto_default_texts", True))
@@ -290,11 +328,20 @@ class MemePluginConfig:
         return bool(self.config.get("meme_search_forward_enabled", True))
 
     def meme_list_text_template(self) -> str:
-        return str(self.config.get("meme_list_text_template", "{index}. {keywords}")).strip() or "{index}. {keywords}"
+        return (
+            str(
+                self.config.get("meme_list_text_template", "{index}. {keywords}")
+            ).strip()
+            or "{index}. {keywords}"
+        )
 
     def meme_list_sort_by(self) -> str:
         sort_by = str(self.config.get("meme_list_sort_by", "创建时间")).strip()
-        return sort_by if sort_by in {"名称", "关键词", "创建时间", "更新时间"} else "创建时间"
+        return (
+            sort_by
+            if sort_by in {"名称", "关键词", "创建时间", "更新时间"}
+            else "创建时间"
+        )
 
     def meme_list_sort_reverse(self) -> bool:
         return bool(self.config.get("meme_list_sort_reverse", True))

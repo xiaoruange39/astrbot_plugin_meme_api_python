@@ -1,1 +1,1 @@
-from .main import MemeUpdater
+from .main import MemeUpdater as MemeUpdater
