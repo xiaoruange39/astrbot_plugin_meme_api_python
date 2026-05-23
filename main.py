@@ -1,31 +1,33 @@
-import os
-import re
-import base64
-import random
-import socket
 import asyncio
-import tempfile
-import time
+import base64
 import ipaddress
 import mimetypes
+import os
+import random
+import re
+import socket
+import tempfile
+import time
 from datetime import datetime
 from urllib.parse import quote, urlparse
 
 import aiohttp
 from quart import jsonify, request
+
+import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import EventMessageType, PermissionType
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
-import astrbot.api.message_components as Comp
-from .usage_stats import MemeUsageStats
+
 from .disabled_memes import DisabledMemeManager
 from .image_renderer import MemeImageRenderer
 from .meme_client import MemeApiClient
 from .plugin_config import MemePluginConfig
 from .repo_manager import MemeRepoManager
+from .usage_stats import MemeUsageStats
 
 TEMP_IMAGE_TTL_SECONDS = 3600
 TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS = 300
@@ -51,6 +53,7 @@ def _format_range(min_value: int, max_value: int) -> str:
 
 def _format_keywords(keywords: list[str]) -> str:
     return "、".join(f"“{keyword}”" for keyword in keywords)
+
 
 class ArgSyntaxError(SyntaxError):
     pass
@@ -102,7 +105,12 @@ class PokeToBotFilter(CustomFilter):
         return MemeUpdater._is_poke_to_bot_event(event)
 
 
-@register("astrbot_plugin_meme_api_python", "表情包数据更新与生成插件", "xiaoruange39", "0.2.4")
+@register(
+    "astrbot_plugin_meme_api_python",
+    "表情包数据更新与生成插件",
+    "xiaoruange39",
+    "0.2.4",
+)
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -133,7 +141,9 @@ class MemeUpdater(Star):
             self._group_name_from_event,
             self._lookup_group_name,
         )
-        self.image_renderer = MemeImageRenderer(self.usage_stats, self.disabled_memes.remove_emoji)
+        self.image_renderer = MemeImageRenderer(
+            self.usage_stats, self.disabled_memes.remove_emoji
+        )
         self.usage_stats.register_web_apis(context, "astrbot_plugin_meme_api_python")
         context.register_web_api(
             "/astrbot_plugin_meme_api_python/disabled-memes",
@@ -164,17 +174,35 @@ class MemeUpdater(Star):
             global_names = self.plugin_config.disabled_meme_names()
             groups = {}
             for group_id, names in self.plugin_config.disabled_meme_groups().items():
-                display_names = self.disabled_memes.disabled_display_names(all_meme_infos, names)
+                display_names = self.disabled_memes.disabled_display_names(
+                    all_meme_infos, names
+                )
                 groups[group_id] = {"count": len(display_names), "items": display_names}
-            global_display_names = self.disabled_memes.disabled_display_names(all_meme_infos, global_names)
-            return jsonify({
-                "global": {"count": len(global_display_names), "items": global_display_names},
-                "groups": groups,
-                "group_names": self.usage_stats.normalize(self.usage_stats.load()).get("group_names", {}),
-            })
+            global_display_names = self.disabled_memes.disabled_display_names(
+                all_meme_infos, global_names
+            )
+            return jsonify(
+                {
+                    "global": {
+                        "count": len(global_display_names),
+                        "items": global_display_names,
+                    },
+                    "groups": groups,
+                    "group_names": self.usage_stats.normalize(
+                        self.usage_stats.load()
+                    ).get("group_names", {}),
+                }
+            )
         except Exception as e:
             logger.error(f"Plugin Page 获取屏蔽表情列表失败: {e}")
-            return jsonify({"global": {"count": 0, "items": []}, "groups": {}, "group_names": {}, "error": str(e)})
+            return jsonify(
+                {
+                    "global": {"count": 0, "items": []},
+                    "groups": {},
+                    "group_names": {},
+                    "error": str(e),
+                }
+            )
 
     async def _disabled_meme_params(self) -> dict:
         payload = {}
@@ -203,15 +231,31 @@ class MemeUpdater(Star):
             params = await self._disabled_meme_params()
             name = str(params.get("name", "")).strip()
             if not name:
-                return jsonify({"success": False, "message": "未提供表情名或关键词"}), 400
+                return jsonify(
+                    {"success": False, "message": "未提供表情名或关键词"}
+                ), 400
             group_id = self._disabled_meme_scope(params)
             all_meme_infos = await self._all_meme_infos_for_disabled_web()
             result = self.disabled_memes.disable(group_id, name, all_meme_infos)
             if result.status == "not_found":
-                return jsonify({"success": False, "message": f"未找到表情：{name}"}), 404
+                return jsonify(
+                    {"success": False, "message": f"未找到表情：{name}"}
+                ), 404
             if result.status == "already_disabled":
-                return jsonify({"success": True, "message": "已在屏蔽列表中", "status": result.status})
-            return jsonify({"success": True, "message": f"已屏蔽 {result.display_name}", "status": result.status})
+                return jsonify(
+                    {
+                        "success": True,
+                        "message": "已在屏蔽列表中",
+                        "status": result.status,
+                    }
+                )
+            return jsonify(
+                {
+                    "success": True,
+                    "message": f"已屏蔽 {result.display_name}",
+                    "status": result.status,
+                }
+            )
         except Exception as e:
             logger.error(f"Plugin Page 添加屏蔽表情失败: {e}")
             return jsonify({"success": False, "message": str(e)}), 500
@@ -221,15 +265,31 @@ class MemeUpdater(Star):
             params = await self._disabled_meme_params()
             name = str(params.get("name", "")).strip()
             if not name:
-                return jsonify({"success": False, "message": "未提供表情名或关键词"}), 400
+                return jsonify(
+                    {"success": False, "message": "未提供表情名或关键词"}
+                ), 400
             group_id = self._disabled_meme_scope(params)
             all_meme_infos = await self._all_meme_infos_for_disabled_web()
             result = self.disabled_memes.enable(group_id, name, all_meme_infos)
             if result.status == "not_found":
-                return jsonify({"success": False, "message": f"未找到表情：{name}"}), 404
+                return jsonify(
+                    {"success": False, "message": f"未找到表情：{name}"}
+                ), 404
             if result.status == "not_disabled":
-                return jsonify({"success": True, "message": "不在屏蔽列表中", "status": result.status})
-            return jsonify({"success": True, "message": f"已取消屏蔽 {result.display_name}", "status": result.status})
+                return jsonify(
+                    {
+                        "success": True,
+                        "message": "不在屏蔽列表中",
+                        "status": result.status,
+                    }
+                )
+            return jsonify(
+                {
+                    "success": True,
+                    "message": f"已取消屏蔽 {result.display_name}",
+                    "status": result.status,
+                }
+            )
         except Exception as e:
             logger.error(f"Plugin Page 删除屏蔽表情失败: {e}")
             return jsonify({"success": False, "message": str(e)}), 500
@@ -253,6 +313,23 @@ class MemeUpdater(Star):
     def _remote_mode_warning(self) -> str:
         return "⚠️ 远程服务器模式（实验性）"
 
+    def _is_allowed_group(self, event: AstrMessageEvent) -> bool:
+        # Block in private chats
+        if event.is_private_chat():
+            return False
+
+        whitelist = self.plugin_config.meme_group_whitelist()
+        if not whitelist:
+            return True
+
+        group_id = self._group_id(event)
+
+        # Only intercept when explicitly in a group chat and the group ID is not in the whitelist
+        if group_id and group_id not in whitelist:
+            return False
+
+        return True
+
     def _format_time(self, dt: datetime) -> str:
         return f"{dt.year}/{dt.month}/{dt.day} {dt:%H:%M:%S}"
 
@@ -263,7 +340,9 @@ class MemeUpdater(Star):
             meme_infos = await self.meme_client.fetch_meme_infos()
             self.meme_infos = dict(meme_infos.items())
             self._refresh_meme_shortcuts()
-            logger.info(f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情")
+            logger.info(
+                f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情"
+            )
             return len(self.meme_infos)
 
     async def _refresh_meme_infos_after_restart(self, lines: list[str]) -> None:
@@ -279,7 +358,9 @@ class MemeUpdater(Star):
                     lines.append(f"⚠️ 刷新表情信息失败：{e}")
                 else:
                     retry_line = f"⏳ meme API 尚未就绪，{MEME_API_RESTART_REFRESH_INTERVAL_SECONDS} 秒后重试刷新表情信息（外层第 {attempt}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次）"
-                    logger.warning(f"重启后刷新表情信息失败，准备重试外层第 {attempt + 1}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次：{e}")
+                    logger.warning(
+                        f"重启后刷新表情信息失败，准备重试外层第 {attempt + 1}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次：{e}"
+                    )
                     lines.append(retry_line)
 
     def _ensure_meme_info_refresh_task(self) -> asyncio.Task | None:
@@ -303,7 +384,9 @@ class MemeUpdater(Star):
         if not task:
             return bool(self.meme_infos)
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=SHORTCUT_INITIALIZE_WAIT_SECONDS)
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=SHORTCUT_INITIALIZE_WAIT_SECONDS
+            )
         except asyncio.TimeoutError:
             return False
         except Exception as e:
@@ -326,12 +409,20 @@ class MemeUpdater(Star):
             if asyncio.iscoroutine(result):
                 await result
 
-    def _shortcut_entry(self, key: str, regex: str, args: list, options: dict) -> dict | None:
+    def _shortcut_entry(
+        self, key: str, regex: str, args: list, options: dict
+    ) -> dict | None:
         if len(regex) > 120:
             logger.debug(f"快捷正则过长，已跳过: {key}")
             return None
         try:
-            return {"key": key, "regex": regex, "compiled_regex": re.compile(f"^{regex}"), "args": args, "options": options}
+            return {
+                "key": key,
+                "regex": regex,
+                "compiled_regex": re.compile(f"^{regex}"),
+                "args": args,
+                "options": options,
+            }
         except re.error as e:
             logger.debug(f"快捷正则编译跳过: {key} - {e}")
             return None
@@ -346,7 +437,9 @@ class MemeUpdater(Star):
             for shortcut in info.get("shortcuts", []):
                 if not isinstance(shortcut, dict):
                     continue
-                shortcut_key = str(shortcut.get("humanized") or shortcut.get("key") or "").strip()
+                shortcut_key = str(
+                    shortcut.get("humanized") or shortcut.get("key") or ""
+                ).strip()
                 if not shortcut_key:
                     continue
                 regex = re.sub(r"\(\?P<(\w+)>", r"(?P<\1>", shortcut_key.strip("^$"))
@@ -359,7 +452,9 @@ class MemeUpdater(Star):
                 if entry:
                     shortcuts.append(entry)
                 if "#" in shortcut_key:
-                    entry = self._shortcut_entry(key, regex.replace("#", ""), args, options)
+                    entry = self._shortcut_entry(
+                        key, regex.replace("#", ""), args, options
+                    )
                     if entry:
                         shortcuts.append(entry)
         shortcuts.sort(key=lambda item: len(item["regex"]), reverse=True)
@@ -378,8 +473,12 @@ class MemeUpdater(Star):
             if not self.disabled_memes.is_meme_disabled(key, info, disabled_names)
         }
 
-    def _find_meme(self, query: str, meme_infos: dict[str, dict] | None = None) -> dict | None:
-        return self.disabled_memes.find_meme_in_infos(query, meme_infos or self.meme_infos)
+    def _find_meme(
+        self, query: str, meme_infos: dict[str, dict] | None = None
+    ) -> dict | None:
+        return self.disabled_memes.find_meme_in_infos(
+            query, meme_infos or self.meme_infos
+        )
 
     def _meme_search_text(self, info: dict) -> str:
         values = [str(info.get("key", ""))]
@@ -387,10 +486,17 @@ class MemeUpdater(Star):
             values.extend(str(value) for value in info.get(field, []))
         for shortcut in info.get("shortcuts", []):
             if isinstance(shortcut, dict):
-                values.append(str(shortcut.get("humanized") or shortcut.get("key") or ""))
+                values.append(
+                    str(shortcut.get("humanized") or shortcut.get("key") or "")
+                )
         return " ".join(values).lower()
 
-    def _search_memes(self, query: str, meme_infos: dict[str, dict] | None = None, limit: int | None = None) -> list[dict]:
+    def _search_memes(
+        self,
+        query: str,
+        meme_infos: dict[str, dict] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
         limit = limit or self.plugin_config.meme_search_limit()
         lowered = query.strip().lower()
         if not lowered:
@@ -410,7 +516,9 @@ class MemeUpdater(Star):
     def _format_meme_search_result(self, index: int, info: dict) -> str:
         return f"{index}. {self.disabled_memes.meme_display_name(info)}"
 
-    def _block_scope_from_args(self, event: AstrMessageEvent, args: str) -> tuple[str, str]:
+    def _block_scope_from_args(
+        self, event: AstrMessageEvent, args: str
+    ) -> tuple[str, str]:
         parts = split_arg_string(args)
         if len(parts) >= 2 and re.fullmatch(r"\d{5,20}", parts[0]):
             return parts[0], " ".join(parts[1:])
@@ -422,13 +530,23 @@ class MemeUpdater(Star):
             return args
         return self._group_id(event)
 
-    async def _block_scope_title(self, event: AstrMessageEvent, group_id: str) -> tuple[str, str]:
+    async def _block_scope_title(
+        self, event: AstrMessageEvent, group_id: str
+    ) -> tuple[str, str]:
         if not group_id:
             return "全局屏蔽表情列表", "全局"
         event_group_id = self._group_id(event)
-        group_name = self._group_name_from_event(event, group_id) if group_id == event_group_id else ""
+        group_name = (
+            self._group_name_from_event(event, group_id)
+            if group_id == event_group_id
+            else ""
+        )
         group_name = group_name or await self._lookup_group_name(event, group_id)
-        title = f"屏蔽表情列表 - {group_name}（{group_id}）" if group_name else f"屏蔽表情列表 - 群 {group_id}"
+        title = (
+            f"屏蔽表情列表 - {group_name}（{group_id}）"
+            if group_name
+            else f"屏蔽表情列表 - 群 {group_id}"
+        )
         return title, "当前群" if group_id == event_group_id else f"群 {group_id}"
 
     async def _block_scope_name(self, event: AstrMessageEvent, group_id: str) -> str:
@@ -456,7 +574,7 @@ class MemeUpdater(Star):
         idx = message.find(command_name)
         if idx != -1:
             # 找到指令位置，截取之后的部分作为参数
-            return message[idx + len(command_name):].strip()
+            return message[idx + len(command_name) :].strip()
 
         return ""
 
@@ -469,11 +587,18 @@ class MemeUpdater(Star):
     def _direction_options_for_key(self, direction: str) -> dict[str, object]:
         return {"direction": direction}
 
-    def _materialize_direction_options(self, options: dict[str, object]) -> dict[str, object]:
+    def _materialize_direction_options(
+        self, options: dict[str, object]
+    ) -> dict[str, object]:
         direction = options.get("__direction")
         if not direction:
             return options
-        resolved = {name: value for name, value in options.items() if name not in {"__direction", "left", "right", "top", "bottom", "direction"}}
+        resolved = {
+            name: value
+            for name, value in options.items()
+            if name
+            not in {"__direction", "left", "right", "top", "bottom", "direction"}
+        }
         resolved.update(self._direction_options_for_key(str(direction)))
         return resolved
 
@@ -555,7 +680,9 @@ class MemeUpdater(Star):
         bot_id = str(raw_event.get("self_id") or raw_event.get("bot_id") or "").strip()
         if bot_id:
             return bot_id
-        return str(getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or "").strip()
+        return str(
+            getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or ""
+        ).strip()
 
     def _bot_avatar_url(self, event: AstrMessageEvent) -> str:
         return self._avatar_url(self._bot_id(event))
@@ -570,11 +697,15 @@ class MemeUpdater(Star):
         message_obj = getattr(event, "message_obj", None)
         raw_message = self._raw_event_dict_from_event(event)
         if isinstance(raw_message, dict):
-            group_id = str(raw_message.get("group_id") or raw_message.get("group") or "").strip()
+            group_id = str(
+                raw_message.get("group_id") or raw_message.get("group") or ""
+            ).strip()
             if group_id:
                 return group_id
         for source in (message_obj, event):
-            group_id = str(getattr(source, "group_id", "") or getattr(source, "group", "") or "").strip()
+            group_id = str(
+                getattr(source, "group_id", "") or getattr(source, "group", "") or ""
+            ).strip()
             if group_id:
                 return group_id
         return ""
@@ -584,18 +715,34 @@ class MemeUpdater(Star):
         raw_message = self._raw_event_dict_from_event(event)
         names = []
         if isinstance(raw_message, dict):
-            for key in ("group_name", "group_card", "group_title", "name", "title", "chat_name"):
+            for key in (
+                "group_name",
+                "group_card",
+                "group_title",
+                "name",
+                "title",
+                "chat_name",
+            ):
                 value = str(raw_message.get(key) or "").strip()
                 if value:
                     names.append(value)
         for source in (message_obj, event):
-            for attr in ("group_name", "group_card", "group_title", "name", "title", "chat_name"):
+            for attr in (
+                "group_name",
+                "group_card",
+                "group_title",
+                "name",
+                "title",
+                "chat_name",
+            ):
                 value = str(getattr(source, attr, "") or "").strip()
                 if value:
                     names.append(value)
         return next((name for name in names if name and name != group_id), "")
 
-    async def _lookup_group_name(self, event: AstrMessageEvent | None, group_id: str) -> str:
+    async def _lookup_group_name(
+        self, event: AstrMessageEvent | None, group_id: str
+    ) -> str:
         if event is None or not group_id:
             return ""
         try:
@@ -614,14 +761,28 @@ class MemeUpdater(Star):
         query_group_id = int(group_id) if group_id.isdigit() else group_id
         calls = []
         if group_id:
-            calls.extend((
-                ("get_group_member_info", {"group_id": query_group_id, "user_id": query_user_id, "no_cache": False}),
-                ("get_group_member", {"group_id": query_group_id, "user_id": query_user_id}),
-            ))
-        calls.extend((
-            ("get_stranger_info", {"user_id": query_user_id, "no_cache": False}),
-            ("get_friend_info", {"user_id": query_user_id}),
-        ))
+            calls.extend(
+                (
+                    (
+                        "get_group_member_info",
+                        {
+                            "group_id": query_group_id,
+                            "user_id": query_user_id,
+                            "no_cache": False,
+                        },
+                    ),
+                    (
+                        "get_group_member",
+                        {"group_id": query_group_id, "user_id": query_user_id},
+                    ),
+                )
+            )
+        calls.extend(
+            (
+                ("get_stranger_info", {"user_id": query_user_id, "no_cache": False}),
+                ("get_friend_info", {"user_id": query_user_id}),
+            )
+        )
 
         for action, params in calls:
             for info in await self._call_bot_action_candidates(bot, action, params):
@@ -630,7 +791,9 @@ class MemeUpdater(Star):
                     return name
         return ""
 
-    async def _call_bot_action_candidates(self, bot: object, action: str, params: dict) -> list[object]:
+    async def _call_bot_action_candidates(
+        self, bot: object, action: str, params: dict
+    ) -> list[object]:
         results = []
         method = getattr(bot, action, None)
         if callable(method):
@@ -653,21 +816,39 @@ class MemeUpdater(Star):
                 logger.debug(f"调用 {action} 失败: {e}")
         return results
 
-    async def _try_send_forward_message(self, event: AstrMessageEvent, title: str, content: str, count: int) -> bool:
+    async def _try_send_forward_message(
+        self, event: AstrMessageEvent, title: str, content: str, count: int
+    ) -> bool:
         bot = getattr(event, "bot", None)
         if not bot or not content:
             return False
         group_id = self._group_id(event)
         user_id = self._sender_id(event)
         bot_id = self._bot_id(event) or "0"
-        nodes = [{"type": "node", "data": {"name": title, "uin": bot_id, "content": content}}]
-        metadata = {"prompt": "表情搜索结果", "summary": f"查看 {count} 条搜索结果", "source": "meme搜索"}
+        nodes = [
+            {"type": "node", "data": {"name": title, "uin": bot_id, "content": content}}
+        ]
+        metadata = {
+            "prompt": "表情搜索结果",
+            "summary": f"查看 {count} 条搜索结果",
+            "source": "meme搜索",
+        }
         if group_id:
             target = int(group_id) if group_id.isdigit() else group_id
-            calls = [("send_group_forward_msg", {"group_id": target, "messages": nodes, **metadata})]
+            calls = [
+                (
+                    "send_group_forward_msg",
+                    {"group_id": target, "messages": nodes, **metadata},
+                )
+            ]
         elif user_id:
             target = int(user_id) if user_id.isdigit() else user_id
-            calls = [("send_private_forward_msg", {"user_id": target, "messages": nodes, **metadata})]
+            calls = [
+                (
+                    "send_private_forward_msg",
+                    {"user_id": target, "messages": nodes, **metadata},
+                )
+            ]
         else:
             return False
         for action, params in calls:
@@ -695,12 +876,28 @@ class MemeUpdater(Star):
                 name = self._name_from_group_info(data, group_id)
                 if name:
                     return name
-            for key in ("group_name", "group_card", "name", "group_title", "title", "chat_name", "nickname"):
+            for key in (
+                "group_name",
+                "group_card",
+                "name",
+                "group_title",
+                "title",
+                "chat_name",
+                "nickname",
+            ):
                 value = str(info.get(key) or "").strip()
                 if value and value != group_id:
                     return value
             return ""
-        for attr in ("group_name", "group_card", "name", "group_title", "title", "chat_name", "nickname"):
+        for attr in (
+            "group_name",
+            "group_card",
+            "name",
+            "group_title",
+            "title",
+            "chat_name",
+            "nickname",
+        ):
             value = str(getattr(info, attr, "") or "").strip()
             if value and value != group_id:
                 return value
@@ -757,7 +954,9 @@ class MemeUpdater(Star):
         bot_id = self._bot_id(event)
         return {"name": bot_id or "机器人", "gender": "unknown"}
 
-    async def _read_limited_response(self, resp: aiohttp.ClientResponse, limit: int | None = None) -> bytes:
+    async def _read_limited_response(
+        self, resp: aiohttp.ClientResponse, limit: int | None = None
+    ) -> bytes:
         max_bytes = limit or self.plugin_config.max_image_bytes()
         chunks = []
         total = 0
@@ -771,14 +970,16 @@ class MemeUpdater(Star):
     def _is_forbidden_ip(self, address: str) -> bool:
         try:
             ip = ipaddress.ip_address(address)
-            return any((
-                ip.is_loopback,
-                ip.is_private,
-                ip.is_link_local,
-                ip.is_multicast,
-                ip.is_reserved,
-                ip.is_unspecified,
-            ))
+            return any(
+                (
+                    ip.is_loopback,
+                    ip.is_private,
+                    ip.is_link_local,
+                    ip.is_multicast,
+                    ip.is_reserved,
+                    ip.is_unspecified,
+                )
+            )
         except ValueError:
             return False
 
@@ -796,7 +997,9 @@ class MemeUpdater(Star):
         if self._is_forbidden_ip(lowered):
             raise RuntimeError("不允许访问内网或本机地址")
         try:
-            infos = await asyncio.to_thread(socket.getaddrinfo, hostname, parsed.port, type=socket.SOCK_STREAM)
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo, hostname, parsed.port, type=socket.SOCK_STREAM
+            )
         except socket.gaierror as e:
             raise RuntimeError(f"图片 URL 域名解析失败：{e}") from e
         resolved_ips = set()
@@ -832,7 +1035,9 @@ class MemeUpdater(Star):
         if content_type == "image/webp" and data[8:12] != b"WEBP":
             raise RuntimeError("下载内容与图片类型不匹配")
 
-    async def _request_external_image(self, session: aiohttp.ClientSession, url: str) -> tuple[bytes, str]:
+    async def _request_external_image(
+        self, session: aiohttp.ClientSession, url: str
+    ) -> tuple[bytes, str]:
         current_url = url
         for _ in range(5):
             _, resolved_ips = await self._validate_external_image_url(current_url)
@@ -853,7 +1058,9 @@ class MemeUpdater(Star):
                 data = await self._read_limited_response(resp)
                 if resp.status >= 400:
                     raise RuntimeError(f"下载图片失败：HTTP {resp.status}")
-                content_type = resp.headers.get("Content-Type", "image/png").split(";", 1)[0]
+                content_type = resp.headers.get("Content-Type", "image/png").split(
+                    ";", 1
+                )[0]
                 if not content_type.startswith("image/"):
                     raise RuntimeError(f"下载内容不是图片：{content_type}")
                 self._validate_image_bytes(data, content_type)
@@ -870,17 +1077,22 @@ class MemeUpdater(Star):
     def _extract_message_segments(self, event: AstrMessageEvent) -> list[object]:
         return self._extract_segments_from_event(event)
 
-    async def _get_replied_message_segments(self, event: AstrMessageEvent) -> list[object]:
+    async def _get_replied_message_segments(
+        self, event: AstrMessageEvent
+    ) -> list[object]:
         for segment in self._extract_message_segments(event):
             if isinstance(segment, dict):
                 if segment.get("type") != "reply":
                     continue
                 data = segment.get("data") or {}
-                message_id = str(data.get("id") or data.get("message_id") or data.get("msg_id") or "").strip()
+                message_id = str(
+                    data.get("id") or data.get("message_id") or data.get("msg_id") or ""
+                ).strip()
             else:
-                chain = getattr(segment, "chain", None)
-                if chain is not None:
-                    return list(chain) if isinstance(chain, list) else []
+                if hasattr(segment, "chain"):
+                    # If segment has its own chain (e.g. Comp.Reply), return its content directly
+                    chain = getattr(segment, "chain", [])
+                    return list(chain) if hasattr(chain, "__iter__") else [chain]
                 message_id = str(
                     getattr(segment, "id", "")
                     or getattr(segment, "message_id", "")
@@ -892,11 +1104,18 @@ class MemeUpdater(Star):
                 if not message_id:
                     data = getattr(segment, "data", None)
                     if isinstance(data, dict):
-                        message_id = str(data.get("id") or data.get("message_id") or data.get("msg_id") or "").strip()
+                        message_id = str(
+                            data.get("id")
+                            or data.get("message_id")
+                            or data.get("msg_id")
+                            or ""
+                        ).strip()
                 if not message_id and not hasattr(segment, "chain"):
                     continue
             if not message_id:
-                logger.warning(f"获取引用消息失败：未找到引用消息 ID，segment={type(segment).__name__}")
+                logger.warning(
+                    f"获取引用消息失败：未找到引用消息 ID，segment={type(segment).__name__}"
+                )
                 return []
             try:
                 msg = await event.bot.get_msg(message_id=int(message_id))
@@ -916,7 +1135,11 @@ class MemeUpdater(Star):
                 data = segment.get("data", {})
                 candidates = [data.get("url"), data.get("file"), data.get("path")]
             else:
-                candidates = [getattr(segment, "url", None), getattr(segment, "file", None), getattr(segment, "path", None)]
+                candidates = [
+                    getattr(segment, "url", None),
+                    getattr(segment, "file", None),
+                    getattr(segment, "path", None),
+                ]
             for candidate in candidates:
                 value = str(candidate or "").strip()
                 if value.startswith("http://") or value.startswith("https://"):
@@ -925,7 +1148,11 @@ class MemeUpdater(Star):
         return urls
 
     def _extract_message_image_urls(self, event: AstrMessageEvent) -> list[str]:
-        segments = [segment for segment in self._extract_message_segments(event) if isinstance(segment, dict) or not hasattr(segment, "chain")]
+        segments = [
+            segment
+            for segment in self._extract_message_segments(event)
+            if isinstance(segment, dict) or not hasattr(segment, "chain")
+        ]
         return self._extract_image_urls_from_segments(segments)
 
     @staticmethod
@@ -951,7 +1178,9 @@ class MemeUpdater(Star):
                 messages = get_messages()
                 if isinstance(messages, list):
                     return messages
-                if messages is not None and not isinstance(messages, (str, bytes, dict)):
+                if messages is not None and not isinstance(
+                    messages, (str, bytes, dict)
+                ):
                     try:
                         return list(messages)
                     except Exception:
@@ -973,28 +1202,51 @@ class MemeUpdater(Star):
     @staticmethod
     def _is_poke_to_bot_event(event: AstrMessageEvent) -> bool:
         message_obj = getattr(event, "message_obj", None)
-        bot_id = str(getattr(event, "self_id", "") or getattr(message_obj, "self_id", "")).strip()
+        bot_id = str(
+            getattr(event, "self_id", "") or getattr(message_obj, "self_id", "")
+        ).strip()
         for segment in MemeUpdater._extract_segments_from_event(event):
             if isinstance(segment, dict):
                 seg_type = str(segment.get("type") or "").lower()
                 data = segment.get("data") or {}
-                target_id = str(data.get("id") or data.get("qq") or data.get("target_id") or "").strip() if isinstance(data, dict) else ""
+                target_id = (
+                    str(
+                        data.get("id") or data.get("qq") or data.get("target_id") or ""
+                    ).strip()
+                    if isinstance(data, dict)
+                    else ""
+                )
             else:
-                seg_type = str(getattr(segment, "type", "") or getattr(segment, "_type", "") or "").lower()
+                seg_type = str(
+                    getattr(segment, "type", "") or getattr(segment, "_type", "") or ""
+                ).lower()
                 target_id = ""
                 target_method = getattr(segment, "target_id", None)
                 if callable(target_method):
                     target_id = str(target_method() or "").strip()
                 if not target_id:
-                    target_id = str(getattr(segment, "id", "") or getattr(segment, "qq", "") or "").strip()
-            if seg_type.endswith("poke") and target_id and bot_id and target_id == bot_id:
+                    target_id = str(
+                        getattr(segment, "id", "") or getattr(segment, "qq", "") or ""
+                    ).strip()
+            if (
+                seg_type.endswith("poke")
+                and target_id
+                and bot_id
+                and target_id == bot_id
+            ):
                 return True
 
         raw = MemeUpdater._raw_event_dict_from_event(event)
         if not raw:
             return False
         post_type = str(raw.get("post_type") or raw.get("type") or "").lower()
-        sub_type = str(raw.get("sub_type") or raw.get("notice_type") or raw.get("event") or raw.get("detail_type") or "").lower()
+        sub_type = str(
+            raw.get("sub_type")
+            or raw.get("notice_type")
+            or raw.get("event")
+            or raw.get("detail_type")
+            or ""
+        ).lower()
         if post_type and post_type not in {"notice", "notify"}:
             return False
         if sub_type not in {"poke", "戳一戳"}:
@@ -1021,17 +1273,25 @@ class MemeUpdater(Star):
             if seg_type in {"text", "plain"} and isinstance(data, dict):
                 return str(data.get("text") or "")
             return ""
-        seg_type = MemeUpdater._segment_type_name(getattr(segment, "type", "") or getattr(segment, "_type", ""))
+        seg_type = MemeUpdater._segment_type_name(
+            getattr(segment, "type", "") or getattr(segment, "_type", "")
+        )
         if seg_type not in {"plain", "text"}:
             return ""
         return str(getattr(segment, "text", "") or "")
 
     def _extract_message_text(self, event: AstrMessageEvent) -> str:
-        text = "".join(self._segment_text(segment) for segment in self._extract_message_segments(event)).strip()
+        text = "".join(
+            self._segment_text(segment)
+            for segment in self._extract_message_segments(event)
+        ).strip()
         if text:
             return text
         message_obj = getattr(event, "message_obj", None)
-        for value in (getattr(message_obj, "message", None), getattr(event, "message", None)):
+        for value in (
+            getattr(message_obj, "message", None),
+            getattr(event, "message", None),
+        ):
             if isinstance(value, str):
                 return value.strip()
         return ""
@@ -1069,15 +1329,30 @@ class MemeUpdater(Star):
                     data = getattr(segment, "data", None)
             if seg_type not in {"at", "mention"} or not isinstance(data, dict):
                 continue
-            qq = str(data.get("qq") or data.get("user_id") or data.get("uid") or data.get("id") or data.get("target") or "").strip()
+            qq = str(
+                data.get("qq")
+                or data.get("user_id")
+                or data.get("uid")
+                or data.get("id")
+                or data.get("target")
+                or ""
+            ).strip()
             if qq and qq != "all" and qq not in user_ids:
                 user_ids.append(qq)
         return user_ids
 
     def _extract_message_at_ids(self, event: AstrMessageEvent) -> list[str]:
-        user_ids = self._extract_at_ids_from_segments(self._extract_message_segments(event))
+        user_ids = self._extract_at_ids_from_segments(
+            self._extract_message_segments(event)
+        )
         text = self._extract_message_text(event)
-        for pattern in (r"\[CQ:at,qq=(\d+)\]", r"\[At:(\d+)\]", r"@[^\s@/\(]+\((\d{5,})\)", r"@[^\s@/]+/(\d{5,})", r"@(?:CQ:at,qq=)?(\d{5,})"):
+        for pattern in (
+            r"\[CQ:at,qq=(\d+)\]",
+            r"\[At:(\d+)\]",
+            r"@[^\s@/\(]+\((\d{5,})\)",
+            r"@[^\s@/]+/(\d{5,})",
+            r"@(?:CQ:at,qq=)?(\d{5,})",
+        ):
             for qq in re.findall(pattern, text):
                 if qq not in user_ids:
                     user_ids.append(qq)
@@ -1086,7 +1361,9 @@ class MemeUpdater(Star):
             user_ids.insert(0, sender_id)
         return user_ids
 
-    async def _resolve_generate_args(self, event: AstrMessageEvent, raw_args: str) -> tuple[list[tuple[bytes, str, str]], list[str], list[dict]]:
+    async def _resolve_generate_args(
+        self, event: AstrMessageEvent, raw_args: str
+    ) -> tuple[list[tuple[bytes, str, str]], list[str], list[dict]]:
         replied_segments = await self._get_replied_message_segments(event)
         image_urls = self._extract_image_urls_from_segments(replied_segments)
         image_urls.extend(self._extract_message_image_urls(event))
@@ -1116,13 +1393,24 @@ class MemeUpdater(Star):
             if arg.startswith("@") and arg[1:].isdigit():
                 user_id = arg[1:]
                 avatar_urls.append(self._avatar_url(user_id))
-                avatar_user_infos.append({"name": await self._lookup_sender_name(event, user_id) or user_id, "gender": "unknown"})
+                avatar_user_infos.append(
+                    {
+                        "name": await self._lookup_sender_name(event, user_id)
+                        or user_id,
+                        "gender": "unknown",
+                    }
+                )
                 continue
             texts.append(arg)
         at_ids = self._extract_message_at_ids(event)
         for user_id in at_ids:
             avatar_urls.append(self._avatar_url(user_id))
-            avatar_user_infos.append({"name": await self._lookup_sender_name(event, user_id) or user_id, "gender": "unknown"})
+            avatar_user_infos.append(
+                {
+                    "name": await self._lookup_sender_name(event, user_id) or user_id,
+                    "gender": "unknown",
+                }
+            )
         explicit_image_count = len(image_urls)
         image_urls.extend(avatar_urls)
         user_infos.extend(avatar_user_infos)
@@ -1131,7 +1419,9 @@ class MemeUpdater(Star):
             for url in image_urls:
                 host = urlparse(url).hostname
                 hosts.append(host or "unknown")
-            logger.info(f"meme 参数图片数量：{len(image_urls)}，来源域名：{hosts}，当前发送者={self._sender_id(event)}")
+            logger.info(
+                f"meme 参数图片数量：{len(image_urls)}，来源域名：{hosts}，当前发送者={self._sender_id(event)}"
+            )
         if image_urls:
             semaphore = asyncio.Semaphore(MAX_IMAGE_DOWNLOAD_CONCURRENCY)
 
@@ -1139,20 +1429,43 @@ class MemeUpdater(Star):
                 async with semaphore:
                     return await self._download_image(url)
 
-            download_results = await asyncio.gather(*(download(url) for url in image_urls), return_exceptions=True)
-            explicit_failures = [result for result in download_results[:explicit_image_count] if isinstance(result, Exception)]
+            download_results = await asyncio.gather(
+                *(download(url) for url in image_urls), return_exceptions=True
+            )
+            explicit_failures = [
+                result
+                for result in download_results[:explicit_image_count]
+                if isinstance(result, Exception)
+            ]
             if explicit_failures:
                 failure = explicit_failures[0]
                 message = str(failure) or type(failure).__name__
                 raise RuntimeError(f"引用/输入图片下载失败：{message}")
-            images = [result for result in download_results if not isinstance(result, Exception)]
-            user_infos = [info for info, result in zip(user_infos, download_results) if not isinstance(result, Exception)]
+            images = [
+                result
+                for result in download_results
+                if not isinstance(result, Exception)
+            ]
+            user_infos = [
+                info
+                for info, result in zip(user_infos, download_results)
+                if not isinstance(result, Exception)
+            ]
         else:
             images = []
         return list(images), texts, user_infos
 
-    async def _fill_sender_avatar_images(self, event: AstrMessageEvent, images: list[tuple[bytes, str, str]], user_infos: list[dict], target_count: int):
-        if not self.plugin_config.meme_auto_sender_avatar() or len(images) >= target_count:
+    async def _fill_sender_avatar_images(
+        self,
+        event: AstrMessageEvent,
+        images: list[tuple[bytes, str, str]],
+        user_infos: list[dict],
+        target_count: int,
+    ):
+        if (
+            not self.plugin_config.meme_auto_sender_avatar()
+            or len(images) >= target_count
+        ):
             return
         avatar = self._sender_avatar_url(event)
         if not avatar:
@@ -1163,7 +1476,13 @@ class MemeUpdater(Star):
             images.insert(0, (data, content_type, filename))
             user_infos.insert(0, user_info)
 
-    async def _fill_default_avatar_images(self, event: AstrMessageEvent, images: list[tuple[bytes, str, str]], user_infos: list[dict], target_count: int):
+    async def _fill_default_avatar_images(
+        self,
+        event: AstrMessageEvent,
+        images: list[tuple[bytes, str, str]],
+        user_infos: list[dict],
+        target_count: int,
+    ):
         if not self.plugin_config.meme_auto_sender_avatar() or images:
             return
         sender_avatar = self._sender_avatar_url(event)
@@ -1186,7 +1505,12 @@ class MemeUpdater(Star):
             user_infos.append(user_info)
             fill_index += 1
 
-    def _select_render_images(self, images: list[tuple[bytes, str, str]], user_infos: list[dict], max_images: int) -> tuple[list[tuple[bytes, str, str]], list[dict]]:
+    def _select_render_images(
+        self,
+        images: list[tuple[bytes, str, str]],
+        user_infos: list[dict],
+        max_images: int,
+    ) -> tuple[list[tuple[bytes, str, str]], list[dict]]:
         if max_images <= 0 or len(images) <= max_images:
             return images, user_infos
         selected_images = images[:max_images]
@@ -1215,7 +1539,9 @@ class MemeUpdater(Star):
         template = self.plugin_config.meme_list_text_template()
         lines = []
         for index, info in enumerate(self._sorted_meme_infos(meme_infos), 1):
-            keywords = "、".join(str(value) for value in info.get("keywords", []) if str(value).strip())
+            keywords = "、".join(
+                str(value) for value in info.get("keywords", []) if str(value).strip()
+            )
             line = template.format(
                 index=index,
                 key=info.get("key", ""),
@@ -1224,7 +1550,9 @@ class MemeUpdater(Star):
             lines.append(line)
         return "\n".join(lines)
 
-    async def _render_list(self, meme_infos: dict[str, dict] | None = None) -> tuple[bytes, str]:
+    async def _render_list(
+        self, meme_infos: dict[str, dict] | None = None
+    ) -> tuple[bytes, str]:
         meme_list = []
         now = datetime.now().timestamp()
         for index, info in enumerate(self._sorted_meme_infos(meme_infos), 1):
@@ -1235,8 +1563,17 @@ class MemeUpdater(Star):
                     labels.append("new")
             except Exception:
                 pass
-            meme_list.append({"meme_key": info.get("key"), "disabled": False, "labels": labels, "index": index})
-        return await self.meme_client.render_list(meme_list, self.plugin_config.meme_list_text_template())
+            meme_list.append(
+                {
+                    "meme_key": info.get("key"),
+                    "disabled": False,
+                    "labels": labels,
+                    "index": index,
+                }
+            )
+        return await self.meme_client.render_list(
+            meme_list, self.plugin_config.meme_list_text_template()
+        )
 
     def _parse_meme_time(self, value: object) -> float:
         if not value:
@@ -1252,17 +1589,31 @@ class MemeUpdater(Star):
             return str(keywords[0]).lower()
         return ""
 
-    def _sorted_meme_infos(self, meme_infos: dict[str, dict] | None = None) -> list[dict]:
+    def _sorted_meme_infos(
+        self, meme_infos: dict[str, dict] | None = None
+    ) -> list[dict]:
         sort_by = self.plugin_config.meme_list_sort_by()
         reverse = self.plugin_config.meme_list_sort_reverse()
         infos = list((meme_infos or self.meme_infos).values())
         if sort_by == "名称":
-            return sorted(infos, key=lambda info: str(info.get("key", "")).lower(), reverse=reverse)
+            return sorted(
+                infos,
+                key=lambda info: str(info.get("key", "")).lower(),
+                reverse=reverse,
+            )
         if sort_by == "关键词":
             return sorted(infos, key=self._meme_keyword_sort_value, reverse=reverse)
         if sort_by == "更新时间":
-            return sorted(infos, key=lambda info: self._parse_meme_time(info.get("date_modified")), reverse=reverse)
-        return sorted(infos, key=lambda info: self._parse_meme_time(info.get("date_created")), reverse=reverse)
+            return sorted(
+                infos,
+                key=lambda info: self._parse_meme_time(info.get("date_modified")),
+                reverse=reverse,
+            )
+        return sorted(
+            infos,
+            key=lambda info: self._parse_meme_time(info.get("date_created")),
+            reverse=reverse,
+        )
 
     def _image_component(self, data: bytes, content_type: str) -> Comp.Image:
         ext = mimetypes.guess_extension(content_type) or ".png"
@@ -1273,7 +1624,9 @@ class MemeUpdater(Star):
             if now - self._last_temp_cleanup >= TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS:
                 self._cleanup_temp_images(temp_dir, now)
                 self._last_temp_cleanup = now
-            with tempfile.NamedTemporaryFile(suffix=ext, dir=temp_dir, delete=False) as tf:
+            with tempfile.NamedTemporaryFile(
+                suffix=ext, dir=temp_dir, delete=False
+            ) as tf:
                 tf.write(data)
                 temp_path = tf.name
             temp_path = os.path.abspath(temp_path).replace("\\", "/")
@@ -1297,6 +1650,7 @@ class MemeUpdater(Star):
         resolved = []
         for value in template_args:
             text = str(value)
+
             def repl(m: re.Match) -> str:
                 name = m.group(1)
                 if name.isdigit():
@@ -1305,10 +1659,13 @@ class MemeUpdater(Star):
                     except IndexError:
                         return name
                 return match.groupdict().get(name) or name
+
             resolved.append(re.sub(r"\{(.+?)\}", repl, text))
         return " ".join(resolved)
 
-    def _normalize_turn_options(self, key: str, raw_args: str) -> tuple[str, dict[str, object]]:
+    def _normalize_turn_options(
+        self, key: str, raw_args: str
+    ) -> tuple[str, dict[str, object]]:
         if key != "turn":
             return raw_args, {}
         compact = raw_args.replace(" ", "")
@@ -1333,7 +1690,9 @@ class MemeUpdater(Star):
     async def update_memes(self, event: AstrMessageEvent):
         try:
             if not self.plugin_config.repo_update_enabled():
-                yield event.plain_result("更新表情包功能未启用，请先在配置项 repo_update_enabled 中开启。")
+                yield event.plain_result(
+                    "更新表情包功能未启用，请先在配置项 repo_update_enabled 中开启。"
+                )
                 return
 
             yield event.plain_result("正在更新表情包数据，请稍候...")
@@ -1349,16 +1708,27 @@ class MemeUpdater(Star):
                 async with semaphore:
                     return await self.repo_manager.sync_repo(repo, index, total)
 
-            results = await asyncio.gather(*[sync_limited(repo, i + 1) for i, repo in enumerate(repos)], return_exceptions=True)
+            results = await asyncio.gather(
+                *[sync_limited(repo, i + 1) for i, repo in enumerate(repos)],
+                return_exceptions=True,
+            )
             normalized_results = []
             for i, result in enumerate(results, 1):
                 if isinstance(result, Exception):
-                    normalized_results.append({"status": "failed", "updated": False, "lines": [f"❌ [{i}/{total}] 更新异常", f"    {result}"]})
+                    normalized_results.append(
+                        {
+                            "status": "failed",
+                            "updated": False,
+                            "lines": [f"❌ [{i}/{total}] 更新异常", f"    {result}"],
+                        }
+                    )
                 else:
                     normalized_results.append(result)
             results = normalized_results
             success = sum(1 for r in results if r["status"] == "success")
-            success_updates = [r for r in results if r["status"] == "success" and r["updated"]]
+            success_updates = [
+                r for r in results if r["status"] == "success" and r["updated"]
+            ]
             failed = sum(1 for r in results if r["status"] == "failed")
             updated = sum(1 for r in results if r["updated"])
 
@@ -1366,9 +1736,13 @@ class MemeUpdater(Star):
             if updated > 0:
                 restart_result = await self.repo_manager.restart_memeapi()
                 if restart_result["success"]:
-                    restart_result["lines"].append("⏳ 等待 meme API 启动后刷新表情信息...")
+                    restart_result["lines"].append(
+                        "⏳ 等待 meme API 启动后刷新表情信息..."
+                    )
                     await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
-                    await self._refresh_meme_infos_after_restart(restart_result["lines"])
+                    await self._refresh_meme_infos_after_restart(
+                        restart_result["lines"]
+                    )
 
             finished_at = datetime.now()
             summary_lines = [
@@ -1389,7 +1763,11 @@ class MemeUpdater(Star):
                 summary_lines.extend(["========================", "✅ 成功更新的仓库:"])
                 for result in success_updates:
                     success_line = next(
-                        (line.strip() for line in result["lines"] if "完成" in line and "📦" not in line),
+                        (
+                            line.strip()
+                            for line in result["lines"]
+                            if "完成" in line and "📦" not in line
+                        ),
                         result["lines"][-1],
                     )
                     summary_lines.append(f"  - {success_line}")
@@ -1398,12 +1776,16 @@ class MemeUpdater(Star):
                 summary_lines.append("准备重启 memeapi...")
                 summary_lines.extend(restart_result["lines"])
                 summary_lines.append("========================")
-                summary_lines.append(f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}")
+                summary_lines.append(
+                    f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}"
+                )
             else:
-                summary_lines.extend([
-                    "仓库无更新，已跳过 memeapi 重启。",
-                    "========================",
-                ])
+                summary_lines.extend(
+                    [
+                        "仓库无更新，已跳过 memeapi 重启。",
+                        "========================",
+                    ]
+                )
 
             yield event.plain_result("\n".join(summary_lines))
         except Exception as e:
@@ -1425,9 +1807,13 @@ class MemeUpdater(Star):
 
         try:
             count = await self._refresh_meme_infos()
-            lines.append(f"meme API: 已加载 {count} 个表情 | {self.plugin_config.meme_api_base_url()}")
+            lines.append(
+                f"meme API: 已加载 {count} 个表情 | {self.plugin_config.meme_api_base_url()}"
+            )
         except Exception as e:
-            lines.append(f"meme API: 无法连接或加载失败 | {self.plugin_config.meme_api_base_url()} | {e}")
+            lines.append(
+                f"meme API: 无法连接或加载失败 | {self.plugin_config.meme_api_base_url()} | {e}"
+            )
 
         yield event.plain_result("\n".join(lines))
 
@@ -1455,55 +1841,81 @@ class MemeUpdater(Star):
             if self._meme_info_refresh_task is task:
                 self._meme_info_refresh_task = None
 
-    async def _set_meme_disabled(self, event: AstrMessageEvent, command_name: str, force_global: bool = False):
+    async def _set_meme_disabled(
+        self, event: AstrMessageEvent, command_name: str, force_global: bool = False
+    ):
         self._stop_event(event)
         name = self._get_message_args(event, command_name)
         if not name:
-            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
+            yield event.plain_result(
+                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
+            )
             return
         if force_global:
             group_id = ""
         else:
             group_id, name = self._block_scope_from_args(event, name)
         if not name:
-            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
+            yield event.plain_result(
+                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
+            )
             return
-        scope_name = "全局" if force_global else await self._block_scope_name(event, group_id)
+        scope_name = (
+            "全局" if force_global else await self._block_scope_name(event, group_id)
+        )
         await self._refresh_meme_infos()
         all_meme_infos = self.meme_infos
         result = self.disabled_memes.disable(group_id, name, all_meme_infos)
         if result.status == "not_found":
-            yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
+            yield event.plain_result(
+                f"未找到表情 “{name}”，请确认名称或关键词是否正确。"
+            )
             return
         if result.status == "already_disabled":
             yield event.plain_result(f"“{name}” 已在{scope_name}屏蔽列表中。")
             return
-        yield event.plain_result(f"已在{scope_name}屏蔽表情 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。")
+        yield event.plain_result(
+            f"已在{scope_name}屏蔽表情 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。"
+        )
 
-    async def _unset_meme_disabled(self, event: AstrMessageEvent, command_name: str, force_global: bool = False):
+    async def _unset_meme_disabled(
+        self, event: AstrMessageEvent, command_name: str, force_global: bool = False
+    ):
         self._stop_event(event)
         name = self._get_message_args(event, command_name)
         if not name:
-            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
+            yield event.plain_result(
+                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
+            )
             return
         if force_global:
             group_id = ""
         else:
             group_id, name = self._block_scope_from_args(event, name)
         if not name:
-            yield event.plain_result(f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>")
+            yield event.plain_result(
+                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
+            )
             return
-        scope_name = "全局" if force_global else await self._block_scope_name(event, group_id)
+        scope_name = (
+            "全局" if force_global else await self._block_scope_name(event, group_id)
+        )
         await self._refresh_meme_infos()
         all_meme_infos = self.meme_infos
         result = self.disabled_memes.enable(group_id, name, all_meme_infos)
         if result.status == "not_found":
-            yield event.plain_result(f"未找到表情 “{name}”，请确认名称或关键词是否正确。")
+            yield event.plain_result(
+                f"未找到表情 “{name}”，请确认名称或关键词是否正确。"
+            )
             return
         if result.status == "not_disabled":
-            yield event.plain_result(f"表情 “{result.display_name}” 不在{scope_name}屏蔽列表中。")
+            yield event.plain_result(
+                f"表情 “{result.display_name}” 不在{scope_name}屏蔽列表中。"
+            )
             return
-        yield event.plain_result(f"已在{scope_name}取消屏蔽 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。")
+        yield event.plain_result(
+            f"已在{scope_name}取消屏蔽 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。"
+        )
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("屏蔽表情")
@@ -1520,13 +1932,17 @@ class MemeUpdater(Star):
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("全局屏蔽表情")
     async def disable_meme_globally(self, event: AstrMessageEvent):
-        async for result in self._set_meme_disabled(event, "全局屏蔽表情", force_global=True):
+        async for result in self._set_meme_disabled(
+            event, "全局屏蔽表情", force_global=True
+        ):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("取消全局屏蔽表情")
     async def enable_meme_globally(self, event: AstrMessageEvent):
-        async for result in self._unset_meme_disabled(event, "取消全局屏蔽表情", force_global=True):
+        async for result in self._unset_meme_disabled(
+            event, "取消全局屏蔽表情", force_global=True
+        ):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -1547,15 +1963,23 @@ class MemeUpdater(Star):
 
     async def _list_disabled_memes(self, event: AstrMessageEvent, group_id: str):
         title, scope_name = await self._block_scope_title(event, group_id)
-        keys = sorted(self.plugin_config.disabled_meme_names() if not group_id else self.plugin_config.disabled_meme_names_for_group(group_id))
+        keys = sorted(
+            self.plugin_config.disabled_meme_names()
+            if not group_id
+            else self.plugin_config.disabled_meme_names_for_group(group_id)
+        )
         if not keys:
             yield event.plain_result(f"{scope_name}没有屏蔽任何表情。")
             return
         await self._refresh_meme_infos()
         all_meme_infos = self.meme_infos
-        display_names = self.disabled_memes.disabled_display_names(all_meme_infos, set(keys))
+        display_names = self.disabled_memes.disabled_display_names(
+            all_meme_infos, set(keys)
+        )
         try:
-            image, content_type = await asyncio.to_thread(self.image_renderer.render_disabled_memes, display_names, title)
+            image, content_type = await asyncio.to_thread(
+                self.image_renderer.render_disabled_memes, display_names, title
+            )
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"渲染屏蔽表情列表图片失败: {e}")
@@ -1570,16 +1994,26 @@ class MemeUpdater(Star):
         scope = "group" if group_id else "global"
         rows = self.usage_stats.rows(scope=scope, group_id=group_id)
         if not rows:
-            yield event.plain_result("当前群组暂无表情调用统计。" if group_id else "暂无表情调用统计。")
+            yield event.plain_result(
+                "当前群组暂无表情调用统计。" if group_id else "暂无表情调用统计。"
+            )
             return
         try:
             await self._refresh_meme_infos()
             title_override = None if group_id else "总表情统计"
-            image, content_type = await asyncio.to_thread(self.image_renderer.render_meme_usage_stats, rows, scope=scope, group_id=group_id, title_override=title_override)
+            image, content_type = await asyncio.to_thread(
+                self.image_renderer.render_meme_usage_stats,
+                rows,
+                scope=scope,
+                group_id=group_id,
+                title_override=title_override,
+            )
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"生成表情调用统计图失败: {e}")
-            yield event.plain_result(self.usage_stats.format_text(rows, scope=scope, group_id=group_id))
+            yield event.plain_result(
+                self.usage_stats.format_text(rows, scope=scope, group_id=group_id)
+            )
 
     @filter.command("总表情统计")
     async def meme_global_usage_stats(self, event: AstrMessageEvent):
@@ -1590,7 +2024,12 @@ class MemeUpdater(Star):
             return
         try:
             await self._refresh_meme_infos()
-            image, content_type = await asyncio.to_thread(self.image_renderer.render_meme_usage_stats, rows, scope="global", title_override="总表情统计")
+            image, content_type = await asyncio.to_thread(
+                self.image_renderer.render_meme_usage_stats,
+                rows,
+                scope="global",
+                title_override="总表情统计",
+            )
             yield event.chain_result([self._image_component(image, content_type)])
         except Exception as e:
             logger.warning(f"生成总表情调用统计图失败: {e}")
@@ -1611,8 +2050,21 @@ class MemeUpdater(Star):
                 yield event.plain_result(f"未找到相关表情：{query}")
                 return
             title = f"搜索结果（查看 {len(matches)} 条搜索结果）"
-            result_text = "\n".join([title, *[self._format_meme_search_result(index, info) for index, info in enumerate(matches, 1)]])
-            if self.plugin_config.meme_search_forward_enabled() and await self._try_send_forward_message(event, title, result_text, len(matches)):
+            result_text = "\n".join(
+                [
+                    title,
+                    *[
+                        self._format_meme_search_result(index, info)
+                        for index, info in enumerate(matches, 1)
+                    ],
+                ]
+            )
+            if (
+                self.plugin_config.meme_search_forward_enabled()
+                and await self._try_send_forward_message(
+                    event, title, result_text, len(matches)
+                )
+            ):
                 return
             yield event.plain_result(result_text)
         except Exception as e:
@@ -1620,6 +2072,8 @@ class MemeUpdater(Star):
 
     @filter.command("表情列表")
     async def meme_list(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         try:
             await self._refresh_meme_infos()
             visible_infos = self._visible_meme_infos(event)
@@ -1630,7 +2084,12 @@ class MemeUpdater(Star):
             except Exception as e:
                 logger.warning(f"meme API 渲染表情列表失败，降级为文本列表: {e}")
             result_text = self._format_meme_list_text(visible_infos)
-            if self.plugin_config.meme_search_forward_enabled() and await self._try_send_forward_message(event, "表情列表", result_text, len(visible_infos)):
+            if (
+                self.plugin_config.meme_search_forward_enabled()
+                and await self._try_send_forward_message(
+                    event, "表情列表", result_text, len(visible_infos)
+                )
+            ):
                 return
             yield event.plain_result(result_text)
         except Exception as e:
@@ -1640,6 +2099,8 @@ class MemeUpdater(Star):
 
     @filter.command("表情详情")
     async def meme_info(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         self._stop_event(event)
         query = self._get_message_args(event, "表情详情")
         if not query:
@@ -1656,19 +2117,33 @@ class MemeUpdater(Star):
                 f"表情：{info.get('key')}",
                 f"关键词：{_format_keywords([str(v) for v in info.get('keywords', [])])}",
             ]
-            shortcuts = [str(v.get("humanized") or v.get("key")) for v in info.get("shortcuts", []) if isinstance(v, dict)]
+            shortcuts = [
+                str(v.get("humanized") or v.get("key"))
+                for v in info.get("shortcuts", [])
+                if isinstance(v, dict)
+            ]
             if shortcuts:
                 lines.append(f"快捷指令：{_format_keywords(shortcuts)}")
             if params["max_images"]:
-                lines.append(f"图片数量：{_format_range(params['min_images'], params['max_images'])}")
+                lines.append(
+                    f"图片数量：{_format_range(params['min_images'], params['max_images'])}"
+                )
             if params["max_texts"]:
-                lines.append(f"文字数量：{_format_range(params['min_texts'], params['max_texts'])}")
+                lines.append(
+                    f"文字数量：{_format_range(params['min_texts'], params['max_texts'])}"
+                )
                 if params["default_texts"]:
-                    lines.append(f"默认文字：{_format_keywords([str(v) for v in params['default_texts']])}")
+                    lines.append(
+                        f"默认文字：{_format_keywords([str(v) for v in params['default_texts']])}"
+                    )
             components = [Comp.Plain("\n".join(lines))]
             try:
-                image, content_type = await self.meme_client.get_preview(str(info.get("key")))
-                components.extend([Comp.Plain("\n"), self._image_component(image, content_type)])
+                image, content_type = await self.meme_client.get_preview(
+                    str(info.get("key"))
+                )
+                components.extend(
+                    [Comp.Plain("\n"), self._image_component(image, content_type)]
+                )
             except Exception as e:
                 logger.warning(f"获取表情预览失败 {info.get('key')}: {e}")
             yield event.chain_result(components)
@@ -1677,15 +2152,21 @@ class MemeUpdater(Star):
 
     @filter.command("制作表情")
     async def meme_generate(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         self._stop_event(event)
         raw_args = self._get_message_args(event, "制作表情")
         if not raw_args:
-            yield event.plain_result("用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]")
+            yield event.plain_result(
+                "用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]"
+            )
             return
         try:
             parts = split_arg_string(raw_args)
             if not parts:
-                yield event.plain_result("用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]")
+                yield event.plain_result(
+                    "用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]"
+                )
                 return
             query, rest = parts[0], " ".join(parts[1:])
             await self._refresh_meme_infos()
@@ -1696,35 +2177,54 @@ class MemeUpdater(Star):
             params = self._params_type(info)
             rest, options = self._normalize_turn_options(str(info.get("key")), rest)
             images, texts, user_infos = await self._resolve_generate_args(event, rest)
-            if self.plugin_config.meme_auto_sender_avatar() and len(images) < params["min_images"]:
+            if (
+                self.plugin_config.meme_auto_sender_avatar()
+                and len(images) < params["min_images"]
+            ):
                 if images:
-                    await self._fill_sender_avatar_images(event, images, user_infos, params["min_images"])
+                    await self._fill_sender_avatar_images(
+                        event, images, user_infos, params["min_images"]
+                    )
                 else:
-                    await self._fill_default_avatar_images(event, images, user_infos, params["min_images"])
+                    await self._fill_default_avatar_images(
+                        event, images, user_infos, params["min_images"]
+                    )
             if self.plugin_config.meme_auto_default_texts() and not texts:
                 texts.extend(str(v) for v in params["default_texts"])
             if not (params["min_images"] <= len(images) <= params["max_images"]):
-                yield event.plain_result(f"图片数量不符，需要 {_format_range(params['min_images'], params['max_images'])} 张，当前 {len(images)} 张。")
+                yield event.plain_result(
+                    f"图片数量不符，需要 {_format_range(params['min_images'], params['max_images'])} 张，当前 {len(images)} 张。"
+                )
                 return
             if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
-                yield event.plain_result(f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。")
+                yield event.plain_result(
+                    f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。"
+                )
                 return
-            image, content_type = await self.meme_client.render_meme(str(info.get("key")), images, texts, user_infos, options)
+            image, content_type = await self.meme_client.render_meme(
+                str(info.get("key")), images, texts, user_infos, options
+            )
             await self.usage_stats.record(event, info)
-            async for result in self._yield_and_stop(event, event.chain_result([self._image_component(image, content_type)])):
+            async for result in self._yield_and_stop(
+                event, event.chain_result([self._image_component(image, content_type)])
+            ):
                 yield result
         except ArgSyntaxError as e:
             yield event.plain_result(str(e))
         except Exception as e:
             yield event.plain_result(f"制作表情失败：{e}")
 
-    async def _random_meme_results(self, event: AstrMessageEvent, raw_args: str, resolve_args: bool = True):
+    async def _random_meme_results(
+        self, event: AstrMessageEvent, raw_args: str, resolve_args: bool = True
+    ):
         try:
             await self._refresh_meme_infos()
             raw_args, options = self._normalize_meme_options(raw_args)
             options = self._materialize_direction_options(options)
             if resolve_args:
-                images, texts, user_infos = await self._resolve_generate_args(event, raw_args)
+                images, texts, user_infos = await self._resolve_generate_args(
+                    event, raw_args
+                )
             else:
                 images, texts, user_infos = [], [], []
             auto_use = not images and not texts
@@ -1732,7 +2232,9 @@ class MemeUpdater(Star):
             for info in self._visible_meme_infos(event).values():
                 params = self._params_type(info)
                 image_count = params["min_images"] if auto_use else len(images)
-                if params["min_images"] <= image_count <= params["max_images"] and (auto_use or params["min_texts"] <= len(texts) <= params["max_texts"]):
+                if params["min_images"] <= image_count <= params["max_images"] and (
+                    auto_use or params["min_texts"] <= len(texts) <= params["max_texts"]
+                ):
                     suitable.append((info, params))
             random.shuffle(suitable)
             for info, params in suitable:
@@ -1740,15 +2242,35 @@ class MemeUpdater(Star):
                     render_images = list(images)
                     render_user_infos = list(user_infos)
                     if auto_use:
-                        await self._fill_default_avatar_images(event, render_images, render_user_infos, params["min_images"])
-                    render_texts = [str(v) for v in params["default_texts"]] if auto_use else texts
-                    image, content_type = await self.meme_client.render_meme(str(info.get("key")), render_images, render_texts, render_user_infos, options)
+                        await self._fill_default_avatar_images(
+                            event,
+                            render_images,
+                            render_user_infos,
+                            params["min_images"],
+                        )
+                    render_texts = (
+                        [str(v) for v in params["default_texts"]] if auto_use else texts
+                    )
+                    image, content_type = await self.meme_client.render_meme(
+                        str(info.get("key")),
+                        render_images,
+                        render_texts,
+                        render_user_infos,
+                        options,
+                    )
                     await self.usage_stats.record(event, info)
-                    keywords = _format_keywords([str(v) for v in info.get("keywords", [])])
-                    async for result in self._yield_and_stop(event, event.chain_result([
-                        Comp.Plain(f"关键词：{keywords}\n"),
-                        self._image_component(image, content_type),
-                    ])):
+                    keywords = _format_keywords(
+                        [str(v) for v in info.get("keywords", [])]
+                    )
+                    async for result in self._yield_and_stop(
+                        event,
+                        event.chain_result(
+                            [
+                                Comp.Plain(f"关键词：{keywords}\n"),
+                                self._image_component(image, content_type),
+                            ]
+                        ),
+                    ):
                         yield result
                     return
                 except Exception as e:
@@ -1760,13 +2282,18 @@ class MemeUpdater(Star):
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):
-        if not self.plugin_config.meme_poke_random_enabled():
+        if (
+            not self.plugin_config.meme_poke_random_enabled()
+            or not self._is_allowed_group(event)
+        ):
             return
         async for result in self._random_meme_results(event, "", resolve_args=False):
             yield result
 
     @filter.event_message_type(EventMessageType.ALL)
     async def meme_shortcut_listener(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         content = self._extract_message_text(event)
         if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
             async for result in self._random_meme_results(event, ""):
@@ -1792,8 +2319,12 @@ class MemeUpdater(Star):
                 match = shortcut["compiled_regex"].match(content)
                 if not match:
                     continue
-                tail = content[match.end():].strip()
-                resolved_args = " ".join(value for value in [self._shortcut_args(shortcut["args"], match), tail] if value).strip()
+                tail = content[match.end() :].strip()
+                resolved_args = " ".join(
+                    value
+                    for value in [self._shortcut_args(shortcut["args"], match), tail]
+                    if value
+                ).strip()
                 info = visible_infos.get(shortcut["key"])
                 if not info:
                     continue
@@ -1803,23 +2334,45 @@ class MemeUpdater(Star):
                 options = {**shortcut.get("options", {}), **options}
                 content_options = self._direction_options_from_text(key, content)
                 if content_options:
-                    for d in ["left", "right", "top", "bottom", "direction", "__direction"]:
+                    for d in [
+                        "left",
+                        "right",
+                        "top",
+                        "bottom",
+                        "direction",
+                        "__direction",
+                    ]:
                         options.pop(d, None)
                     options.update(content_options)
                 options = self._materialize_direction_options(options)
-                images, texts, user_infos = await self._resolve_generate_args(event, resolved_args)
+                images, texts, user_infos = await self._resolve_generate_args(
+                    event, resolved_args
+                )
 
-                if params["max_images"] == 2 and str(info.get("key")) != MIRAGETANK_KEY and len(images) >= 3:
-                    images = [images[0], images[1]]
-                    user_infos = [user_infos[0], user_infos[1]]
+                if (
+                    params["max_images"] == 2
+                    and str(info.get("key")) != MIRAGETANK_KEY
+                    and len(images) >= 3
+                ):
+                    images = [images[0], images[-1]]
+                    user_infos = [user_infos[0], user_infos[-1]]
                 elif len(images) > params["max_images"]:
-                    images, user_infos = self._select_render_images(images, user_infos, params["max_images"])
+                    images, user_infos = self._select_render_images(
+                        images, user_infos, params["max_images"]
+                    )
 
-                if self.plugin_config.meme_auto_sender_avatar() and len(images) < params["min_images"]:
+                if (
+                    self.plugin_config.meme_auto_sender_avatar()
+                    and len(images) < params["min_images"]
+                ):
                     if images:
-                        await self._fill_sender_avatar_images(event, images, user_infos, params["min_images"])
+                        await self._fill_sender_avatar_images(
+                            event, images, user_infos, params["min_images"]
+                        )
                     else:
-                        await self._fill_default_avatar_images(event, images, user_infos, params["min_images"])
+                        await self._fill_default_avatar_images(
+                            event, images, user_infos, params["min_images"]
+                        )
 
                 if self.plugin_config.meme_auto_default_texts() and not texts:
                     texts.extend(str(v) for v in params["default_texts"])
@@ -1829,7 +2382,9 @@ class MemeUpdater(Star):
                 if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
                     continue
 
-                image, content_type = await self.meme_client.render_meme(key, images, texts, user_infos, options)
+                image, content_type = await self.meme_client.render_meme(
+                    key, images, texts, user_infos, options
+                )
                 await self.usage_stats.record(event, info)
                 yield event.chain_result([self._image_component(image, content_type)])
                 self._stop_event(event)
