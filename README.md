@@ -7,7 +7,7 @@
 - 从多个表情包仓库拉取/更新数据，并重启 meme-generator 容器。
 - 调用 meme-generator API，提供表情列表、详情、随机表情和制作表情能力。
 
-## 前置要求
+## 前置要求（如果不用更新功能，直接填meme-generator API即可使用）
 
 1. 已部署并能访问 meme-generator API，默认地址为 `http://127.0.0.1:2233`。
 2. `更新表情包` 和 `重启memeapi` 依赖 Docker 部署的 meme-generator，插件会在更新后执行 `docker restart <容器名>` 重启容器。
