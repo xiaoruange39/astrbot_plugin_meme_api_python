@@ -36,6 +36,19 @@ SHORTCUT_INITIALIZE_WAIT_SECONDS = 10
 MEME_API_RESTART_REFRESH_ATTEMPTS = 6
 MEME_API_RESTART_REFRESH_INTERVAL_SECONDS = 5
 MIRAGETANK_KEY = "miragetank"
+LOUVRE_KEY = "louvre"
+LOUVRE_MODE_MAPPING = {
+    "随机": 0,
+    "精细": 1,
+    "一般": 2,
+    "稍粗": 3,
+    "超粗": 4,
+    "极粗": 5,
+    "浮雕": 6,
+    "线稿": 7,
+    "彩色线稿": 7,
+    "线稿彩色": 7,
+}
 PLUGIN_NAME = "meme_updater"
 
 QUOTE_PAIRS = {
@@ -109,7 +122,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.2.4",
+    "0.2.5",
 )
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -314,10 +327,6 @@ class MemeUpdater(Star):
         return "⚠️ 远程服务器模式（实验性）"
 
     def _is_allowed_group(self, event: AstrMessageEvent) -> bool:
-        # Block in private chats
-        if event.is_private_chat():
-            return False
-
         whitelist = self.plugin_config.meme_group_whitelist()
         if not whitelist:
             return True
@@ -1675,6 +1684,28 @@ class MemeUpdater(Star):
             return "", self._direction_options_for_key("left")
         return raw_args, {}
 
+    def _louvre_options_from_args(
+        self, key: str, raw_args: str
+    ) -> tuple[str, dict[str, object]]:
+        if key != LOUVRE_KEY:
+            return raw_args, {}
+        tokens = split_arg_string(raw_args)
+        remaining = []
+        options: dict[str, object] = {}
+        for token in tokens:
+            if "number" not in options:
+                stripped = token.lstrip("#").strip()
+                if stripped in LOUVRE_MODE_MAPPING:
+                    options["number"] = LOUVRE_MODE_MAPPING[stripped]
+                    continue
+                if stripped.isdigit():
+                    n = int(stripped)
+                    if 0 <= n <= 7:
+                        options["number"] = n
+                        continue
+            remaining.append(token)
+        return " ".join(remaining), options
+
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("重启memeapi")
     async def restart_memeapi(self, event: AstrMessageEvent):
@@ -2176,6 +2207,10 @@ class MemeUpdater(Star):
                 return
             params = self._params_type(info)
             rest, options = self._normalize_turn_options(str(info.get("key")), rest)
+            rest, louvre_options = self._louvre_options_from_args(
+                str(info.get("key")), rest
+            )
+            options.update(louvre_options)
             images, texts, user_infos = await self._resolve_generate_args(event, rest)
             if (
                 self.plugin_config.meme_auto_sender_avatar()
@@ -2345,6 +2380,10 @@ class MemeUpdater(Star):
                         options.pop(d, None)
                     options.update(content_options)
                 options = self._materialize_direction_options(options)
+                resolved_args, louvre_options = self._louvre_options_from_args(
+                    key, resolved_args
+                )
+                options.update(louvre_options)
                 images, texts, user_infos = await self._resolve_generate_args(
                     event, resolved_args
                 )
