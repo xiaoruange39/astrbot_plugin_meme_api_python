@@ -130,6 +130,8 @@ class MemeUpdater(Star):
         self.config = config
         self._meme_infos: dict[str, dict] = {}
         self._meme_shortcuts: list[dict] = []
+        self._shortcut_index: dict[str, list[dict]] = {}
+        self._shortcut_wildcards: list[dict] = []
         self._meme_info_lock = asyncio.Lock()
         self._meme_info_refresh_task: asyncio.Task | None = None
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
@@ -418,6 +420,15 @@ class MemeUpdater(Star):
             if asyncio.iscoroutine(result):
                 await result
 
+    def _regex_first_literal(self, regex: str) -> str | None:
+        if not regex:
+            return None
+        if regex[0] == "\\":
+            return regex[1] if len(regex) > 1 else None
+        if regex[0] in ".^$*+?()[]{}|":
+            return None
+        return regex[0]
+
     def _shortcut_entry(
         self, key: str, regex: str, args: list, options: dict
     ) -> dict | None:
@@ -431,6 +442,7 @@ class MemeUpdater(Star):
                 "compiled_regex": re.compile(f"^{regex}"),
                 "args": args,
                 "options": options,
+                "first_char": self._regex_first_literal(regex),
             }
         except re.error as e:
             logger.debug(f"快捷正则编译跳过: {key} - {e}")
@@ -468,6 +480,16 @@ class MemeUpdater(Star):
                         shortcuts.append(entry)
         shortcuts.sort(key=lambda item: len(item["regex"]), reverse=True)
         self.meme_shortcuts = shortcuts
+        index: dict[str, list[dict]] = {}
+        wildcards: list[dict] = []
+        for entry in shortcuts:
+            first_char = entry.get("first_char")
+            if first_char:
+                index.setdefault(first_char, []).append(entry)
+            else:
+                wildcards.append(entry)
+        self._shortcut_index = index
+        self._shortcut_wildcards = wildcards
 
     def _disabled_names_for_event(self, event: AstrMessageEvent) -> set[str]:
         return self.plugin_config.disabled_meme_names_for_group(self._group_id(event))
@@ -2349,8 +2371,15 @@ class MemeUpdater(Star):
         if not self.meme_shortcuts:
             self._refresh_meme_shortcuts()
         visible_infos = self._visible_meme_infos(event)
+        candidates = self._shortcut_index.get(content[0], [])
+        if self._shortcut_wildcards:
+            candidates = sorted(
+                [*candidates, *self._shortcut_wildcards],
+                key=lambda item: len(item["regex"]),
+                reverse=True,
+            )
         try:
-            for shortcut in self.meme_shortcuts:
+            for shortcut in candidates:
                 match = shortcut["compiled_regex"].match(content)
                 if not match:
                     continue

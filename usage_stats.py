@@ -118,7 +118,7 @@ class MemeUsageStats:
             os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"表情统计数据已保存至: {self.path}")
+            logger.debug(f"表情统计数据已保存至: {self.path}")
         except Exception as e:
             logger.error(f"保存表情统计数据失败: {e}")
 
@@ -185,19 +185,13 @@ class MemeUsageStats:
                     JSON_HEADERS,
                 )
             data = self.normalize(self.load())
-            cached_name = str(data.get("group_names", {}).get(group_id) or "").strip()
-            group_name = cached_name
-            if group_name:
-                async with self.lock:
-                    data = self.normalize(self.load())
-                    data.setdefault("group_names", {})[group_id] = group_name
-                    self.save(data)
+            group_name = str(data.get("group_names", {}).get(group_id) or "").strip()
             return (
                 json.dumps(
                     {
                         "success": True,
                         "group_id": group_id,
-                        "group_name": group_name or "",
+                        "group_name": group_name,
                     },
                     ensure_ascii=False,
                 ),
