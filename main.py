@@ -32,7 +32,6 @@ from .usage_stats import MemeUsageStats
 TEMP_IMAGE_TTL_SECONDS = 3600
 TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS = 300
 MAX_IMAGE_DOWNLOAD_CONCURRENCY = 4
-SHORTCUT_INITIALIZE_WAIT_SECONDS = 10
 MEME_API_RESTART_REFRESH_ATTEMPTS = 6
 MEME_API_RESTART_REFRESH_INTERVAL_SECONDS = 5
 MIRAGETANK_KEY = "miragetank"
@@ -388,22 +387,9 @@ class MemeUpdater(Star):
         self._meme_info_refresh_task = asyncio.create_task(self._refresh_meme_infos())
         return self._meme_info_refresh_task
 
-    async def _wait_meme_info_refresh_for_shortcut(self) -> bool:
-        if self.meme_infos:
-            return True
-        task = self._ensure_meme_info_refresh_task()
-        if not task:
-            return bool(self.meme_infos)
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(task), timeout=SHORTCUT_INITIALIZE_WAIT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            return False
-        except Exception as e:
-            logger.warning(f"快捷指令等待 meme API 表情信息初始化失败: {e}")
-            return False
-        return bool(self.meme_infos)
+    async def initialize(self):
+        # 插件加载后立即在后台预热表情信息，避免第一条消息到来时才触发初始化。
+        self._ensure_meme_info_refresh_task()
 
     async def terminate(self):
         task = self._meme_info_refresh_task
@@ -1081,12 +1067,12 @@ class MemeUpdater(Star):
             _, resolved_ips = await self._validate_external_image_url(current_url)
             async with session.get(current_url, allow_redirects=False) as resp:
                 peer_ip = self._response_peer_ip(resp)
-                if not peer_ip:
-                    raise RuntimeError("无法确认图片下载的实际连接地址")
-                if self._is_forbidden_ip(peer_ip):
+                if peer_ip and self._is_forbidden_ip(peer_ip):
                     raise RuntimeError("实际连接到了内网或本机地址")
-                if resolved_ips and peer_ip not in resolved_ips:
+                if peer_ip and resolved_ips and peer_ip not in resolved_ips:
                     raise RuntimeError("图片下载连接地址与校验结果不一致")
+                if not peer_ip:
+                    logger.debug(f"无法确认图片下载的实际连接地址，已使用 DNS 校验结果继续: {current_url}")
                 if 300 <= resp.status < 400:
                     location = resp.headers.get("Location")
                     if not location:
@@ -2375,10 +2361,11 @@ class MemeUpdater(Star):
         if not content or content.startswith(("/", "#", "%", "％")):
             return
         if not self.meme_infos:
-            if not await self._wait_meme_info_refresh_for_shortcut():
-                logger.info("表情信息正在初始化，请稍后再试一次。")
-                self._stop_event(event)
-                return
+            # 表情信息尚未就绪：后台异步刷新，本条消息直接放行。
+            # 不能在此 await 等待初始化完成，否则会阻塞整个事件总线，导致所有消息
+            # 收发卡住；也不能 stop_event，否则会把 help 等本不该由本插件处理的消息拦截。
+            self._ensure_meme_info_refresh_task()
+            return
         if not self.meme_shortcuts:
             self._refresh_meme_shortcuts()
         visible_infos = self._visible_meme_infos(event)
