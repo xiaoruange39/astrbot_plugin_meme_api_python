@@ -370,7 +370,7 @@ class MemeUpdater(Star):
                 else:
                     retry_line = f"⏳ meme API 尚未就绪，{MEME_API_RESTART_REFRESH_INTERVAL_SECONDS} 秒后重试刷新表情信息（外层第 {attempt}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次）"
                     logger.warning(
-                        f"重启后刷新表情信息失败，准备重试外层第 {attempt + 1}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次：{e}"
+                        f"重启后刷新表情信息失败，准备重试外层第 {attempt}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次：{e}"
                     )
                     lines.append(retry_line)
 
@@ -429,11 +429,22 @@ class MemeUpdater(Star):
             return None
         return regex[0]
 
+    def _is_dangerous_regex(self, regex: str) -> bool:
+        # 上游仓库的 shortcut 正则用标准 re 编译，无超时保护。
+        # 拒绝嵌套量词（如 (a+)+、(a*)*、(a+)*），避免灾难性回溯打满 CPU。
+        return bool(
+            re.search(r"\([^()]*[+*][^()]*\)\s*[+*]", regex)
+            or re.search(r"\([^()]*[+*][^()]*\)\{", regex)
+        )
+
     def _shortcut_entry(
         self, key: str, regex: str, args: list, options: dict
     ) -> dict | None:
         if len(regex) > 120:
             logger.debug(f"快捷正则过长，已跳过: {key}")
+            return None
+        if self._is_dangerous_regex(regex):
+            logger.debug(f"快捷正则存在回溯风险，已跳过: {key} - {regex}")
             return None
         try:
             return {
@@ -467,7 +478,7 @@ class MemeUpdater(Star):
                 args = shortcut.get("args") or []
                 options = {}
                 compact_key = shortcut_key.replace(" ", "").replace("#", "")
-                if key in {"turn", "symmetry"}:
+                if key == "symmetry":
                     options.update(self._direction_options_from_text(key, compact_key))
                 entry = self._shortcut_entry(key, regex, args, options)
                 if entry:
@@ -528,7 +539,8 @@ class MemeUpdater(Star):
         meme_infos: dict[str, dict] | None = None,
         limit: int | None = None,
     ) -> list[dict]:
-        limit = limit or self.plugin_config.meme_search_limit()
+        if limit is None:
+            limit = self.plugin_config.meme_search_limit()
         lowered = query.strip().lower()
         if not lowered:
             return []
@@ -665,11 +677,6 @@ class MemeUpdater(Star):
 
     def _direction_options_from_text(self, key: str, text: str) -> dict[str, object]:
         compact = text.replace(" ", "").replace("#", "")
-        if key == "turn":
-            if compact.startswith("转右"):
-                return self._direction_options_for_key("right")
-            if compact.startswith("转左"):
-                return self._direction_options_for_key("left")
         if key == "symmetry":
             if compact.startswith("对称右"):
                 return self._direction_options_for_key("right")
@@ -1694,17 +1701,18 @@ class MemeUpdater(Star):
             resolved.append(re.sub(r"\{(.+?)\}", repl, text))
         return " ".join(resolved)
 
-    def _normalize_turn_options(
-        self, key: str, raw_args: str
-    ) -> tuple[str, dict[str, object]]:
+    def _strip_random_direction_options(
+        self, key: str, options: dict[str, object]
+    ) -> dict[str, object]:
+        # “转”表情方向随机，方向参数无效，直接忽略以免传给 API 报错。
         if key != "turn":
-            return raw_args, {}
-        compact = raw_args.replace(" ", "")
-        if compact in {"右", "#右"}:
-            return "", self._direction_options_for_key("right")
-        if compact in {"左", "#左"}:
-            return "", self._direction_options_for_key("left")
-        return raw_args, {}
+            return options
+        return {
+            name: value
+            for name, value in options.items()
+            if name
+            not in {"__direction", "direction", "left", "right", "top", "bottom"}
+        }
 
     def _louvre_options_from_args(
         self, key: str, raw_args: str
@@ -2228,10 +2236,11 @@ class MemeUpdater(Star):
                 yield event.plain_result(f"未找到表情：{query}")
                 return
             params = self._params_type(info)
-            rest, options = self._normalize_turn_options(str(info.get("key")), rest)
-            rest, louvre_options = self._louvre_options_from_args(
-                str(info.get("key")), rest
-            )
+            key = str(info.get("key"))
+            rest, options = self._normalize_meme_options(rest)
+            options = self._strip_random_direction_options(key, options)
+            options = self._materialize_direction_options(options)
+            rest, louvre_options = self._louvre_options_from_args(key, rest)
             options.update(louvre_options)
             images, texts, user_infos = await self._resolve_generate_args(event, rest)
             if (
@@ -2259,7 +2268,7 @@ class MemeUpdater(Star):
                 )
                 return
             image, content_type = await self.meme_client.render_meme(
-                str(info.get("key")), images, texts, user_infos, options
+                key, images, texts, user_infos, options
             )
             await self.usage_stats.record(event, info)
             async for result in self._yield_and_stop(
@@ -2313,7 +2322,9 @@ class MemeUpdater(Star):
                         render_images,
                         render_texts,
                         render_user_infos,
-                        options,
+                        self._strip_random_direction_options(
+                            str(info.get("key")), options
+                        ),
                     )
                     await self.usage_stats.record(event, info)
                     keywords = _format_keywords(
@@ -2408,6 +2419,7 @@ class MemeUpdater(Star):
                     ]:
                         options.pop(d, None)
                     options.update(content_options)
+                options = self._strip_random_direction_options(key, options)
                 options = self._materialize_direction_options(options)
                 resolved_args, louvre_options = self._louvre_options_from_args(
                     key, resolved_args
@@ -2450,9 +2462,13 @@ class MemeUpdater(Star):
                 if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
                     continue
 
-                image, content_type = await self.meme_client.render_meme(
-                    key, images, texts, user_infos, options
-                )
+                try:
+                    image, content_type = await self.meme_client.render_meme(
+                        key, images, texts, user_infos, options
+                    )
+                except Exception as e:
+                    logger.debug(f"快捷指令渲染跳过 {key}: {e}")
+                    continue
                 await self.usage_stats.record(event, info)
                 yield event.chain_result([self._image_component(image, content_type)])
                 self._stop_event(event)
