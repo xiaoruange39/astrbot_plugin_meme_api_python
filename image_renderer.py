@@ -4,6 +4,8 @@ import platform
 import threading
 from collections.abc import Callable
 
+from astrbot.api import logger
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:
@@ -17,6 +19,7 @@ class MemeImageRenderer:
         self._usage_font_candidates: list[tuple[int, str]] | None = None
         self._usage_font_cache = {}
         self._usage_font_lock = threading.Lock()
+        self._usage_font_warned = False
 
     def _font_supports_usage_text(self, font) -> bool:
         try:
@@ -120,6 +123,12 @@ class MemeImageRenderer:
             except Exception:
                 continue
         font = ImageFont.load_default()
+        if not self._usage_font_warned:
+            self._usage_font_warned = True
+            logger.warning(
+                "未找到可用的中文字体，统计/列表图片将回退到默认字体，"
+                "中文可能显示为方块或缺字，请在部署环境安装中文字体"
+            )
         with self._usage_font_lock:
             self._usage_font_cache[size] = font
         return font
@@ -193,12 +202,44 @@ class MemeImageRenderer:
             )
         image.alpha_composite(overlay)
 
+    def _draw_card_shadows(
+        self,
+        image,
+        count: int,
+        columns: int,
+        margin_x: int,
+        top_h: int,
+        card_w: int,
+        card_h: int,
+        gap_x: int,
+        gap_y: int,
+        scale: int,
+    ) -> None:
+        """在单张 overlay 上批量绘制所有卡片阴影，最后只合成一次。"""
+        shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        for index in range(count):
+            row, col = divmod(index, columns)
+            x = margin_x + col * (card_w + gap_x)
+            y = top_h + row * (card_h + gap_y)
+            shadow_draw.rounded_rectangle(
+                (
+                    x + 3 * scale,
+                    y + 5 * scale,
+                    x + card_w + 3 * scale,
+                    y + card_h + 5 * scale,
+                ),
+                radius=20 * scale,
+                fill=(48, 72, 102, 22),
+            )
+        image.alpha_composite(shadow)
+
     def render_meme_usage_stats(
         self,
         rows: list[tuple[str, int]],
         scope: str = "global",
         group_id: str = "",
-        title_override: str = None,
+        title_override: str | None = None,
     ) -> tuple[bytes, str]:
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow 不可用")
@@ -255,23 +296,23 @@ class MemeImageRenderer:
         )
         self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
         max_count = max((count for _, count in shown_rows), default=1)
+        stats_data = self.usage_stats.load()
+        self._draw_card_shadows(
+            image,
+            len(shown_rows),
+            columns,
+            margin_x,
+            top_h,
+            card_w,
+            card_h,
+            gap_x,
+            gap_y,
+            scale,
+        )
         for index, (key, count) in enumerate(shown_rows):
             row, col = divmod(index, columns)
             x = margin_x + col * (card_w + gap_x)
             y = top_h + row * (card_h + gap_y)
-            shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-            shadow_draw = ImageDraw.Draw(shadow)
-            shadow_draw.rounded_rectangle(
-                (
-                    x + 3 * scale,
-                    y + 5 * scale,
-                    x + card_w + 3 * scale,
-                    y + card_h + 5 * scale,
-                ),
-                radius=20 * scale,
-                fill=(48, 72, 102, 22),
-            )
-            image.alpha_composite(shadow)
             draw.rounded_rectangle(
                 (x, y, x + card_w, y + card_h),
                 radius=20 * scale,
@@ -297,7 +338,7 @@ class MemeImageRenderer:
             self._draw_usage_text(
                 draw,
                 (x + 30 * scale, y + 40 * scale),
-                self.usage_stats.display_name(key, scope, group_id),
+                self.usage_stats.display_name(key, scope, group_id, data=stats_data),
                 name_font,
                 "#1f2d3d",
                 card_w - 112 * scale,
@@ -371,23 +412,22 @@ class MemeImageRenderer:
             width=scale,
         )
         self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
+        self._draw_card_shadows(
+            image,
+            len(names),
+            columns,
+            margin_x,
+            top_h,
+            card_w,
+            card_h,
+            gap_x,
+            gap_y,
+            scale,
+        )
         for index, name in enumerate(names):
             row, col = divmod(index, columns)
             x = margin_x + col * (card_w + gap_x)
             y = top_h + row * (card_h + gap_y)
-            shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-            shadow_draw = ImageDraw.Draw(shadow)
-            shadow_draw.rounded_rectangle(
-                (
-                    x + 3 * scale,
-                    y + 5 * scale,
-                    x + card_w + 3 * scale,
-                    y + card_h + 5 * scale,
-                ),
-                radius=20 * scale,
-                fill=(48, 72, 102, 22),
-            )
-            image.alpha_composite(shadow)
             draw.rounded_rectangle(
                 (x, y, x + card_w, y + card_h),
                 radius=20 * scale,

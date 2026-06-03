@@ -219,7 +219,7 @@ class MemeUsageStats:
             key = args.get("key", "")
             scope = args.get("scope", "global")
             group_id = args.get("group_id", "")
-            delete_all = args.get("all", "") == "1"
+            delete_all = str(args.get("all", "")).lower() in {"1", "true", "yes"}
 
             async with self.lock:
                 data = self.normalize(self.load())
@@ -290,13 +290,21 @@ class MemeUsageStats:
                     data.setdefault("group_names", {})[group_id] = group_name
             self.save(data)
 
-    def display_name(self, key: str, scope: str = "global", group_id: str = "") -> str:
+    def display_name(
+        self,
+        key: str,
+        scope: str = "global",
+        group_id: str = "",
+        data: dict | None = None,
+    ) -> str:
         info = self._meme_infos_getter().get(key) or {}
         if info:
             name = self._meme_display_name(info)
             if name and name != key:
                 return name
-        item = self.bucket(self.load(), scope, group_id).get(key)
+        if data is None:
+            data = self.load()
+        item = self.bucket(data, scope, group_id).get(key)
         if isinstance(item, dict):
             name = str(item.get("name") or "").strip()
             if name:
@@ -322,10 +330,15 @@ class MemeUsageStats:
     def format_text(
         self, rows: list[tuple[str, int]], scope: str = "global", group_id: str = ""
     ) -> str:
-        total = sum(count for _, count in self.rows(10**9, scope, group_id))
+        data = self.load()
+        bucket = self.bucket(data, scope, group_id)
+        total = sum(
+            self._safe_int(item.get("count") if isinstance(item, dict) else item)
+            for item in bucket.values()
+        )
         lines = [self.title(), f"表情调用总次数：{total}"]
         lines.extend(
-            f"{index}. {self.display_name(key, scope, group_id)}：{count} 次"
+            f"{index}. {self.display_name(key, scope, group_id, data=data)}：{count} 次"
             for index, (key, count) in enumerate(rows, 1)
         )
         return "\n".join(lines)

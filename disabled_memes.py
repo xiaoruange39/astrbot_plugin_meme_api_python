@@ -4,6 +4,22 @@ from dataclasses import dataclass
 from astrbot.api import logger
 
 
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001f1e6-\U0001f1ff"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001faff"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
 @dataclass
 class DisabledMemeResult:
     status: str
@@ -41,7 +57,7 @@ class DisabledMemeManager:
                 if not isinstance(shortcut, dict):
                     continue
                 value = shortcut.get("humanized") or shortcut.get("key")
-                if str(value).lower() == lowered:
+                if value is not None and str(value).lower() == lowered:
                     return info
         return None
 
@@ -58,21 +74,7 @@ class DisabledMemeManager:
         return keywords[0] if keywords else str(info.get("key", ""))
 
     def remove_emoji(self, text: str) -> str:
-        emoji_pattern = re.compile(
-            "["
-            "\U0001f1e6-\U0001f1ff"
-            "\U0001f300-\U0001f5ff"
-            "\U0001f600-\U0001f64f"
-            "\U0001f680-\U0001f6ff"
-            "\U0001f700-\U0001f77f"
-            "\U0001f780-\U0001f7ff"
-            "\U0001f800-\U0001f8ff"
-            "\U0001f900-\U0001f9ff"
-            "\U0001fa00-\U0001faff"
-            "]+",
-            flags=re.UNICODE,
-        )
-        return emoji_pattern.sub("", text).replace("️", "").replace("‍", "").strip()
+        return _EMOJI_PATTERN.sub("", text).replace("️", "").replace("‍", "").strip()
 
     def _save_config(self) -> None:
         save_config = getattr(self.config, "save_config", None)

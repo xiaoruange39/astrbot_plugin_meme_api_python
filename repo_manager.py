@@ -3,6 +3,7 @@ import os
 import platform
 import posixpath
 import shlex
+import shutil
 import tempfile
 from urllib.parse import urlparse
 
@@ -385,10 +386,7 @@ class MemeRepoManager:
             [f"❌ [{index}/{total}] {owner_repo} git clone 失败", f"    {output[:300]}"]
         )
         if not remote_mode and not os.path.isdir(os.path.join(clone_path, ".git")):
-            try:
-                os.rmdir(clone_path)
-            except OSError:
-                pass
+            shutil.rmtree(clone_path, ignore_errors=True)
         return {"status": "failed", "updated": False, "lines": lines}
 
     async def restart_memeapi(self) -> dict:

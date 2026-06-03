@@ -36,6 +36,7 @@ MEME_API_RESTART_REFRESH_ATTEMPTS = 6
 MEME_API_RESTART_REFRESH_INTERVAL_SECONDS = 5
 MIRAGETANK_KEY = "miragetank"
 LOUVRE_KEY = "louvre"
+QQ_AVATAR_URL_TEMPLATE = "https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
 LOUVRE_MODE_MAPPING = {
     "随机": 0,
     "精细": 1,
@@ -323,9 +324,6 @@ class MemeUpdater(Star):
     @meme_shortcuts.setter
     def meme_shortcuts(self, value: list[dict]):
         self._meme_shortcuts = value
-
-    def _remote_mode_warning(self) -> str:
-        return "⚠️ 远程服务器模式（实验性）"
 
     def _is_allowed_group(self, event: AstrMessageEvent) -> bool:
         whitelist = self.plugin_config.meme_group_whitelist()
@@ -631,10 +629,12 @@ class MemeUpdater(Star):
         resolved.update(self._direction_options_for_key(str(direction)))
         return resolved
 
-    def _normalize_meme_options(self, raw_args: str) -> tuple[str, dict[str, object]]:
+    def _normalize_meme_options(
+        self, tokens: list[str]
+    ) -> tuple[list[str], dict[str, object]]:
         options: dict[str, object] = {}
-        tokens = []
-        for token in split_arg_string(raw_args):
+        remaining = []
+        for token in tokens:
             if token in {"右", "#右"}:
                 self._set_direction_option(options, "right")
                 continue
@@ -658,8 +658,8 @@ class MemeUpdater(Star):
                 name, value = token.split("=", 1)
                 options[name.replace("-", "_")] = value
                 continue
-            tokens.append(token)
-        return " ".join(tokens), options
+            remaining.append(token)
+        return remaining, options
 
     def _direction_options_from_text(self, key: str, text: str) -> dict[str, object]:
         compact = text.replace(" ", "").replace("#", "")
@@ -677,7 +677,7 @@ class MemeUpdater(Star):
     def _avatar_url(self, user_id: str) -> str:
         if not user_id:
             return ""
-        return f"https://q4.qlogo.cn/headimg_dl?dst_uin={quote(str(user_id), safe='')}&spec=640"
+        return QQ_AVATAR_URL_TEMPLATE.format(user_id=quote(str(user_id), safe=""))
 
     def _sender_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
@@ -1320,9 +1320,6 @@ class MemeUpdater(Star):
                 return value.strip()
         return ""
 
-    def _raw_event_dict(self, event: AstrMessageEvent) -> dict:
-        return self._raw_event_dict_from_event(event)
-
     def _stop_event(self, event: AstrMessageEvent):
         stop_event = getattr(event, "stop_event", None)
         if callable(stop_event):
@@ -1331,9 +1328,6 @@ class MemeUpdater(Star):
     async def _yield_and_stop(self, event: AstrMessageEvent, result):
         self._stop_event(event)
         yield result
-
-    def _is_poke_to_bot(self, event: AstrMessageEvent) -> bool:
-        return self._is_poke_to_bot_event(event)
 
     def _extract_at_ids_from_segments(self, segments: list[object]) -> list[str]:
         user_ids = []
@@ -1386,7 +1380,7 @@ class MemeUpdater(Star):
         return user_ids
 
     async def _resolve_generate_args(
-        self, event: AstrMessageEvent, raw_args: str
+        self, event: AstrMessageEvent, tokens: list[str]
     ) -> tuple[list[tuple[bytes, str, str]], list[str], list[dict]]:
         replied_segments = await self._get_replied_message_segments(event)
         image_urls = self._extract_image_urls_from_segments(replied_segments)
@@ -1401,7 +1395,7 @@ class MemeUpdater(Star):
             r"^@[^\s@/\(]+\(\d{5,}\)$",
             r"^@[^\s@/]+/\d{5,}$",
         )
-        for arg in split_arg_string(raw_args):
+        for arg in tokens:
             if any(re.fullmatch(pattern, arg) for pattern in mention_patterns):
                 continue
             if arg in {"自己", "@自己"}:
@@ -1601,11 +1595,11 @@ class MemeUpdater(Star):
 
     def _parse_meme_time(self, value: object) -> float:
         if not value:
-            return 0
+            return 0.0
         try:
             return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
         except Exception:
-            return 0
+            return 0.0
 
     def _meme_keyword_sort_value(self, info: dict) -> str:
         keywords = info.get("keywords")
@@ -1701,11 +1695,10 @@ class MemeUpdater(Star):
         }
 
     def _louvre_options_from_args(
-        self, key: str, raw_args: str
-    ) -> tuple[str, dict[str, object]]:
+        self, key: str, tokens: list[str]
+    ) -> tuple[list[str], dict[str, object]]:
         if key != LOUVRE_KEY:
-            return raw_args, {}
-        tokens = split_arg_string(raw_args)
+            return tokens, {}
         remaining = []
         options: dict[str, object] = {}
         for token in tokens:
@@ -1720,7 +1713,7 @@ class MemeUpdater(Star):
                         options["number"] = n
                         continue
             remaining.append(token)
-        return " ".join(remaining), options
+        return remaining, options
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("重启memeapi")
@@ -2215,7 +2208,7 @@ class MemeUpdater(Star):
                     "用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]"
                 )
                 return
-            query, rest = parts[0], " ".join(parts[1:])
+            query, rest = parts[0], parts[1:]
             await self._refresh_meme_infos()
             info = self._find_meme(query, self._visible_meme_infos(event))
             if not info:
@@ -2271,11 +2264,13 @@ class MemeUpdater(Star):
     ):
         try:
             await self._refresh_meme_infos()
-            raw_args, options = self._normalize_meme_options(raw_args)
+            tokens, options = self._normalize_meme_options(
+                split_arg_string(raw_args)
+            )
             options = self._materialize_direction_options(options)
             if resolve_args:
                 images, texts, user_infos = await self._resolve_generate_args(
-                    event, raw_args
+                    event, tokens
                 )
             else:
                 images, texts, user_infos = [], [], []
@@ -2392,7 +2387,9 @@ class MemeUpdater(Star):
                     continue
                 params = self._params_type(info)
                 key = str(info.get("key"))
-                resolved_args, options = self._normalize_meme_options(resolved_args)
+                resolved_tokens, options = self._normalize_meme_options(
+                    split_arg_string(resolved_args)
+                )
                 options = {**shortcut.get("options", {}), **options}
                 content_options = self._direction_options_from_text(key, content)
                 if content_options:
@@ -2408,12 +2405,12 @@ class MemeUpdater(Star):
                     options.update(content_options)
                 options = self._strip_random_direction_options(key, options)
                 options = self._materialize_direction_options(options)
-                resolved_args, louvre_options = self._louvre_options_from_args(
-                    key, resolved_args
+                resolved_tokens, louvre_options = self._louvre_options_from_args(
+                    key, resolved_tokens
                 )
                 options.update(louvre_options)
                 images, texts, user_infos = await self._resolve_generate_args(
-                    event, resolved_args
+                    event, resolved_tokens
                 )
 
                 if (
