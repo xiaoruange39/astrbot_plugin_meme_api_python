@@ -68,7 +68,7 @@ def _format_keywords(keywords: list[str]) -> str:
     return "、".join(f"“{keyword}”" for keyword in keywords)
 
 
-class ArgSyntaxError(SyntaxError):
+class ArgSyntaxError(Exception):
     pass
 
 
@@ -136,6 +136,8 @@ class MemeUpdater(Star):
         self._meme_info_refresh_task: asyncio.Task | None = None
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
         self._last_temp_cleanup = 0.0
+        self._temp_cleanup_task: asyncio.Task | None = None
+        self._download_session: aiohttp.ClientSession | None = None
         self.plugin_config = MemePluginConfig(config, self._meme_data_dir)
         self.repo_manager = MemeRepoManager(self.plugin_config, self._meme_data_dir)
         self.meme_client = MemeApiClient(
@@ -383,21 +385,65 @@ class MemeUpdater(Star):
             except Exception as e:
                 logger.warning(f"后台刷新 meme API 表情信息失败: {e}")
         self._meme_info_refresh_task = asyncio.create_task(self._refresh_meme_infos())
+        self._meme_info_refresh_task.add_done_callback(
+            self._log_background_task_result
+        )
         return self._meme_info_refresh_task
+
+    def _log_background_task_result(self, task: asyncio.Task) -> None:
+        # 作为 fire-and-forget 任务的 done 回调，显式消费异常，
+        # 避免 asyncio "Task exception was never retrieved" 告警。
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(f"后台任务异常退出：{exc}")
+
+    async def _temp_cleanup_loop(self):
+        # 常驻后台定期清理过期临时图片，与用户请求解耦：
+        # 即便长时间无人生成表情，旧文件也能按 TTL 被回收。启动即先扫一次，
+        # 不必等待首个间隔。
+        while True:
+            try:
+                temp_dir = os.path.join(self._meme_data_dir, "temp")
+                if os.path.isdir(temp_dir):
+                    await asyncio.to_thread(self._cleanup_temp_images, temp_dir)
+                    self._last_temp_cleanup = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"后台清理临时图片失败：{e}")
+            await asyncio.sleep(TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS)
 
     async def initialize(self):
         # 插件加载后立即在后台预热表情信息，避免第一条消息到来时才触发初始化。
         self._ensure_meme_info_refresh_task()
+        if self._temp_cleanup_task is None or self._temp_cleanup_task.done():
+            self._temp_cleanup_task = asyncio.create_task(self._temp_cleanup_loop())
+            self._temp_cleanup_task.add_done_callback(
+                self._log_background_task_result
+            )
 
     async def terminate(self):
-        task = self._meme_info_refresh_task
-        if task and not task.done():
-            task.cancel()
+        for attr in ("_meme_info_refresh_task", "_temp_cleanup_task"):
+            task = getattr(self, attr, None)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            setattr(self, attr, None)
+        try:
+            await self.meme_client.close()
+        except Exception as e:
+            logger.debug(f"关闭 meme API session 失败：{e}")
+        if self._download_session is not None and not self._download_session.closed:
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._meme_info_refresh_task = None
+                await self._download_session.close()
+            except Exception as e:
+                logger.debug(f"关闭图片下载 session 失败：{e}")
+        self._download_session = None
         parent_terminate = getattr(super(), "terminate", None)
         if parent_terminate:
             result = parent_terminate()
@@ -1059,13 +1105,26 @@ class MemeUpdater(Star):
         if content_type == "image/webp" and data[8:12] != b"WEBP":
             raise RuntimeError("下载内容与图片类型不匹配")
 
+    def _ensure_download_session(self) -> aiohttp.ClientSession:
+        # 复用单个长生命周期 session 下载外部图片，利用 Keep-Alive 连接池。
+        # 不绑定默认超时，超时按请求传入；SSRF 校验仍逐请求在
+        # _request_external_image 中进行，与 session 复用无关。
+        if self._download_session is None or self._download_session.closed:
+            self._download_session = aiohttp.ClientSession()
+        return self._download_session
+
     async def _request_external_image(
-        self, session: aiohttp.ClientSession, url: str
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        timeout: aiohttp.ClientTimeout,
     ) -> tuple[bytes, str]:
         current_url = url
         for _ in range(5):
             _, resolved_ips = await self._validate_external_image_url(current_url)
-            async with session.get(current_url, allow_redirects=False) as resp:
+            async with session.get(
+                current_url, allow_redirects=False, timeout=timeout
+            ) as resp:
                 peer_ip = self._response_peer_ip(resp)
                 if peer_ip and self._is_forbidden_ip(peer_ip):
                     raise RuntimeError("实际连接到了内网或本机地址")
@@ -1093,8 +1152,8 @@ class MemeUpdater(Star):
 
     async def _download_image(self, url: str) -> tuple[bytes, str, str]:
         timeout = aiohttp.ClientTimeout(total=self.plugin_config.meme_request_timeout())
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            data, content_type = await self._request_external_image(session, url)
+        session = self._ensure_download_session()
+        data, content_type = await self._request_external_image(session, url, timeout)
         ext = mimetypes.guess_extension(content_type) or ".png"
         return data, content_type, f"image{ext}"
 
@@ -1639,7 +1698,14 @@ class MemeUpdater(Star):
             temp_dir = os.path.join(self._meme_data_dir, "temp")
             os.makedirs(temp_dir, exist_ok=True)
             now = time.time()
-            if now - self._last_temp_cleanup >= TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS:
+            # 常驻后台 _temp_cleanup_loop 是主清理权威；仅当其未在运行时
+            # （理论兜底）才在此内联清理，避免两条路径并发遍历同一目录。
+            cleanup_task = self._temp_cleanup_task
+            background_alive = cleanup_task is not None and not cleanup_task.done()
+            if (
+                not background_alive
+                and now - self._last_temp_cleanup >= TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS
+            ):
                 self._cleanup_temp_images(temp_dir, now)
                 self._last_temp_cleanup = now
             with tempfile.NamedTemporaryFile(
@@ -2029,6 +2095,8 @@ class MemeUpdater(Star):
 
     @filter.command("表情统计")
     async def meme_usage_stats(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         self._stop_event(event)
         group_id = self._group_id(event)
         scope = "group" if group_id else "global"
@@ -2057,6 +2125,8 @@ class MemeUpdater(Star):
 
     @filter.command("总表情统计")
     async def meme_global_usage_stats(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         self._stop_event(event)
         rows = self.usage_stats.rows(scope="global")
         if not rows:
@@ -2077,6 +2147,8 @@ class MemeUpdater(Star):
 
     @filter.command("meme搜索")
     async def meme_search(self, event: AstrMessageEvent):
+        if not self._is_allowed_group(event):
+            return
         self._stop_event(event)
         query = self._get_message_args(event, "meme搜索")
         if not query:

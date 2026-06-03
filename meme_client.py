@@ -24,6 +24,20 @@ class MemeApiClient:
         self._max_image_bytes_getter = max_image_bytes_getter
         self._info_concurrency_getter = info_concurrency_getter
         self._verbose_log_getter = verbose_log_getter
+        self._session: aiohttp.ClientSession | None = None
+
+    def _ensure_session(self) -> aiohttp.ClientSession:
+        # 复用单个长生命周期 session，以利用 Keep-Alive 连接池。
+        # 不绑定默认超时，超时按请求单独传入（各接口的 sock_* 配置不同）。
+        # 懒创建：首次请求时已处于运行中的事件循环内，避免无循环告警。
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
     async def _read_limited_response(
         self, resp: aiohttp.ClientResponse, limit: int | None = None
@@ -73,20 +87,13 @@ class MemeApiClient:
                         f"meme API JSON 解析失败：{e.msg}，响应片段：{text[:120]}"
                     ) from e
 
+        active_session = session or self._ensure_session()
         for attempt in range(1, attempts + 1):
-            if session:
-                for path in paths:
-                    try:
-                        return await request_once(session, path)
-                    except Exception as e:
-                        errors.append(f"{path}: {e}")
-            else:
-                async with aiohttp.ClientSession(timeout=timeout) as new_session:
-                    for path in paths:
-                        try:
-                            return await request_once(new_session, path)
-                        except Exception as e:
-                            errors.append(f"{path}: {e}")
+            for path in paths:
+                try:
+                    return await request_once(active_session, path)
+                except Exception as e:
+                    errors.append(f"{path}: {e}")
             if attempt < attempts:
                 logger.warning(
                     f"meme API 请求失败，准备重试 {attempt}/{attempts}：{errors[-1] if errors else '未知错误'}"
@@ -99,35 +106,33 @@ class MemeApiClient:
     ) -> tuple[bytes, str]:
         errors = []
         timeout = aiohttp.ClientTimeout(total=self._timeout_getter(), sock_connect=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for path in paths:
-                try:
-                    kwargs = {}
-                    if form_factory is not None:
-                        kwargs["data"] = form_factory()
-                    else:
-                        kwargs["json"] = json_body or {}
-                    async with session.post(
-                        f"{self._base_url_getter()}{path}", **kwargs
-                    ) as resp:
-                        data = await self._read_limited_response(resp)
-                        content_type = (
-                            resp.headers.get("Content-Type", "")
-                            .split(";", 1)[0]
-                            .lower()
-                        )
-                        if resp.status < 400:
-                            if not content_type.startswith("image/"):
-                                text = data.decode("utf-8", errors="replace")[:300]
-                                raise RuntimeError(
-                                    f"meme API 返回非图片内容：{content_type or '未知类型'}，响应片段：{text}"
-                                )
-                            return data, content_type
-                        errors.append(
-                            f"{path}: HTTP {resp.status}: {data.decode('utf-8', errors='replace')[:300]}"
-                        )
-                except Exception as e:
-                    errors.append(f"{path}: {e}")
+        session = self._ensure_session()
+        for path in paths:
+            try:
+                kwargs = {}
+                if form_factory is not None:
+                    kwargs["data"] = form_factory()
+                else:
+                    kwargs["json"] = json_body or {}
+                async with session.post(
+                    f"{self._base_url_getter()}{path}", timeout=timeout, **kwargs
+                ) as resp:
+                    data = await self._read_limited_response(resp)
+                    content_type = (
+                        resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                    )
+                    if resp.status < 400:
+                        if not content_type.startswith("image/"):
+                            text = data.decode("utf-8", errors="replace")[:300]
+                            raise RuntimeError(
+                                f"meme API 返回非图片内容：{content_type or '未知类型'}，响应片段：{text}"
+                            )
+                        return data, content_type
+                    errors.append(
+                        f"{path}: HTTP {resp.status}: {data.decode('utf-8', errors='replace')[:300]}"
+                    )
+            except Exception as e:
+                errors.append(f"{path}: {e}")
         raise RuntimeError("; ".join(errors) or "meme API 渲染失败")
 
     async def _get_image(self, paths: list[str]) -> tuple[bytes, str]:
@@ -135,28 +140,26 @@ class MemeApiClient:
         timeout = aiohttp.ClientTimeout(
             total=self._timeout_getter(), sock_connect=5, sock_read=5
         )
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for path in paths:
-                try:
-                    async with session.get(
-                        f"{self._base_url_getter()}{path}", timeout=timeout
-                    ) as resp:
-                        data = await self._read_limited_response(resp)
-                        content_type = (
-                            resp.headers.get("Content-Type", "")
-                            .split(";", 1)[0]
-                            .lower()
-                        )
-                        if resp.status < 400:
-                            if not content_type.startswith("image/"):
-                                text = data.decode("utf-8", errors="replace")[:300]
-                                raise RuntimeError(
-                                    f"meme API 返回非图片内容：{content_type or '未知类型'}，响应片段：{text}"
-                                )
-                            return data, content_type
-                        last_error = data.decode("utf-8", errors="replace")[:300]
-                except Exception as e:
-                    last_error = str(e)
+        session = self._ensure_session()
+        for path in paths:
+            try:
+                async with session.get(
+                    f"{self._base_url_getter()}{path}", timeout=timeout
+                ) as resp:
+                    data = await self._read_limited_response(resp)
+                    content_type = (
+                        resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                    )
+                    if resp.status < 400:
+                        if not content_type.startswith("image/"):
+                            text = data.decode("utf-8", errors="replace")[:300]
+                            raise RuntimeError(
+                                f"meme API 返回非图片内容：{content_type or '未知类型'}，响应片段：{text}"
+                            )
+                        return data, content_type
+                    last_error = data.decode("utf-8", errors="replace")[:300]
+            except Exception as e:
+                last_error = str(e)
         raise RuntimeError(last_error or "meme API 图片请求失败")
 
     async def fetch_meme_infos(self) -> dict[str, dict]:
@@ -219,14 +222,11 @@ class MemeApiClient:
                     logger.warning(f"获取表情信息失败 {key}: {e}")
                     return None
 
-        timeout = aiohttp.ClientTimeout(
-            total=self._timeout_getter(), sock_connect=5, sock_read=5
+        session = self._ensure_session()
+        results = await asyncio.gather(
+            *(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)),
+            return_exceptions=True,
         )
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            results = await asyncio.gather(
-                *(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)),
-                return_exceptions=True,
-            )
 
         entries = [r for r in results if r is not None and not isinstance(r, Exception)]
         return dict(entries)
