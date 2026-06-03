@@ -245,6 +245,15 @@ class MemePluginConfig:
         except (TypeError, ValueError):
             return 30
 
+    def meme_list_render_timeout(self) -> int:
+        # 表情列表需渲染大量卡片，比单张表情慢，单独给更长的超时。
+        # 不小于普通请求超时，避免被配置成更短反而更易超时。
+        try:
+            value = max(1, int(self.config.get("meme_list_render_timeout", 60)))
+        except (TypeError, ValueError):
+            value = 60
+        return max(value, self.meme_request_timeout())
+
     def max_image_bytes(self) -> int:
         try:
             mb = int(self.config.get("meme_max_image_mb", 10))

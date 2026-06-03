@@ -102,10 +102,17 @@ class MemeApiClient:
         raise RuntimeError("; ".join(errors[-6:]) or "meme API 请求失败")
 
     async def _post_image(
-        self, paths: list[str], *, json_body: dict | None = None, form_factory=None
+        self,
+        paths: list[str],
+        *,
+        json_body: dict | None = None,
+        form_factory=None,
+        timeout_total: int | None = None,
     ) -> tuple[bytes, str]:
         errors = []
-        timeout = aiohttp.ClientTimeout(total=self._timeout_getter(), sock_connect=5)
+        timeout = aiohttp.ClientTimeout(
+            total=timeout_total or self._timeout_getter(), sock_connect=5
+        )
         session = self._ensure_session()
         for path in paths:
             try:
@@ -270,7 +277,7 @@ class MemeApiClient:
         )
 
     async def render_list(
-        self, meme_list: list[dict], text_template: str
+        self, meme_list: list[dict], text_template: str, timeout_total: int | None = None
     ) -> tuple[bytes, str]:
         return await self._post_image(
             [
@@ -283,4 +290,5 @@ class MemeApiClient:
                 "text_template": text_template,
                 "add_category_icon": True,
             },
+            timeout_total=timeout_total,
         )

@@ -11,6 +11,12 @@
     "type": "int",
     "default": 30
   },
+  "meme_list_render_timeout": {
+    "description": "表情列表渲染超时秒数",
+    "hint": "表情列表图需渲染大量卡片，比单张表情慢，单独设置更长超时。不会小于 meme_request_timeout。",
+    "type": "int",
+    "default": 60
+  },
   "meme_max_image_mb": {
     "description": "最大图片下载限制 (MB)",
     "hint": "防止恶意 URL 下载超大文件导致内存泄漏，默认 10MB。",

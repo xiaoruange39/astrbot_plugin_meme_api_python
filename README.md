@@ -25,6 +25,7 @@
 | `docker_container` | meme-generator 容器名，默认 `meme-generator`。 |
 | `meme_api_base_url` | meme-generator API 地址，默认 `http://127.0.0.1:2233`。 |
 | `meme_request_timeout` | meme API 请求超时时间，复杂表情可适当调大。 |
+| `meme_list_render_timeout` | 表情列表图渲染超时时间，默认 60 秒，不会小于 `meme_request_timeout`。 |
 | `meme_max_image_mb` | 外部图片下载大小限制，默认 10MB。 |
 | `meme_info_concurrency` | 刷新表情详情时的并发数。 |
 | `meme_refresh_verbose_log` | 是否输出每个表情详情的刷新日志。 |

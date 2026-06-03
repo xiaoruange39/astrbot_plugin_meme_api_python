@@ -122,7 +122,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.2.5",
+    "0.2.7",
 )
 class MemeUpdater(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -1650,7 +1650,9 @@ class MemeUpdater(Star):
                 }
             )
         return await self.meme_client.render_list(
-            meme_list, self.plugin_config.meme_list_text_template()
+            meme_list,
+            self.plugin_config.meme_list_text_template(),
+            timeout_total=self.plugin_config.meme_list_render_timeout(),
         )
 
     def _parse_meme_time(self, value: object) -> float:
