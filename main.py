@@ -928,8 +928,9 @@ class MemeUpdater(Star):
                     await call_action(action, **params)
                     return True
                 except Exception as e:
-                    logger.debug(f"调用 {action} 失败: {e}")
-                    continue
+                    # 不要 continue：calls 仅一个元素，continue 会直接结束循环，
+                    # 跳过下面紧接着的 bot.<action>(**params) 直调降级。
+                    logger.debug(f"调用 {action} 失败，尝试直调降级: {e}")
             method = getattr(bot, action, None)
             if callable(method):
                 try:

@@ -6,7 +6,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from quart import jsonify, request
+from quart import request
 
 from astrbot.api import logger
 
@@ -147,7 +147,14 @@ class MemeUsageStats:
             return json.dumps(normalized, ensure_ascii=False), 200, JSON_HEADERS
         except Exception as e:
             logger.error(f"Plugin Page 获取统计失败: {e}")
-            return jsonify({"global": {}, "groups": {}, "error": str(e)})
+            # 保持原状态码 200（前端据此渲染空统计 + 错误提示），仅统一序列化写法。
+            return (
+                json.dumps(
+                    {"global": {}, "groups": {}, "error": str(e)}, ensure_ascii=False
+                ),
+                200,
+                JSON_HEADERS,
+            )
 
     async def _mutation_params(self) -> dict:
         payload = {}
