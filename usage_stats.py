@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -115,9 +116,23 @@ class MemeUsageStats:
 
     def save(self, data: dict[str, dict]) -> None:
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            directory = os.path.dirname(os.path.abspath(self.path))
+            os.makedirs(directory, exist_ok=True)
+            # 原子写入：先写同目录临时文件并 fsync，成功后再 os.replace 覆盖原文件。
+            # 避免写入中途崩溃/断电导致统计文件被截断或清空、数据永久丢失。
+            fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self.path)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.debug(f"表情统计数据已保存至: {self.path}")
         except Exception as e:
             logger.error(f"保存表情统计数据失败: {e}")
