@@ -41,7 +41,7 @@ docker run -d \
   meetwq/meme-generator:main
 ```
 
-具体参考 [meme-generator Docker 部署 Wiki](https://github.com/MemeCrafters/meme-generator/wiki/Docker-%E9%83%A8%E7%BD%B2)。
+详细参数说明 [meme-generator Docker 部署 Wiki](https://github.com/MemeCrafters/meme-generator/wiki/Docker-%E9%83%A8%E7%BD%B2)。
 
 ## 配置说明
 
