@@ -15,6 +15,34 @@
 4. 如果使用远程更新模式，AstrBot 运行环境需要能通过 `ssh` 登录远程服务器。
 5. QQ 头像和 QQ 图片下载依赖外网访问，网络不通时会影响自动补头像或引用图片生成。
 
+## Docker 一键部署 memeapi
+
+请根据实际情况更改映射目录，下面使用的是插件配置项的默认目录：
+
+```bash
+docker run -d \
+  --name=meme-generator \
+  -p 2233:2233 \
+  --restart always \
+  -v /root/memeapi/meme-generator/meme_generator/memes:/data/memes1 \
+  -v /root/memeapi/meme-generator-jj/memes:/data/memes2 \
+  -v /root/memeapi/meme_emoji/emoji:/data/memes3 \
+  -v /root/memeapi/meme_emoji_nsfw/emoji:/data/memes4 \
+  -v /root/memeapi/tudou-meme/meme:/data/memes5 \
+  -v /root/memeapi/xiaoruan-meme/emoji:/data/memes6 \
+  -v /root/memeapi/meme-generator-contrib/memes:/data/memes7 \
+  -e MEME_DIRS='["/data/memes1","/data/memes2","/data/memes3","/data/memes4","/data/memes5","/data/memes6","/data/memes7"]' \
+  -e MEME_DISABLED_LIST='[]' \
+  -e GIF_MAX_SIZE=10.0 \
+  -e GIF_MAX_FRAMES=100 \
+  -e BAIDU_TRANS_APPID=<YOUR_BAIDU_TRANS_APPID> \
+  -e BAIDU_TRANS_APIKEY=<YOUR_BAIDU_TRANS_APIKEY> \
+  -e LOG_LEVEL='INFO' \
+  meetwq/meme-generator:main
+```
+
+具体参考 [meme-generator Docker 部署 Wiki](https://github.com/MemeCrafters/meme-generator/wiki/Docker-%E9%83%A8%E7%BD%B2)。
+
 ## 配置说明
 
 主要配置项在 AstrBot 插件配置页面中填写：
