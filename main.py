@@ -1,20 +1,11 @@
 import asyncio
-import base64
-import ipaddress
-import mimetypes
 import os
-import random
 import re
-import socket
-import tempfile
 import time
 from datetime import datetime
-from urllib.parse import quote, urlparse
 
 import aiohttp
-from quart import jsonify, request
 
-import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import EventMessageType, PermissionType
@@ -22,16 +13,15 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
 
-from .disabled_memes import DisabledMemeManager
-from .image_renderer import MemeImageRenderer
-from .meme_client import MemeApiClient
-from .plugin_config import MemePluginConfig
-from .repo_manager import MemeRepoManager
-from .usage_stats import MemeUsageStats
+from .src.disabled_memes import DisabledMemeManager
+from .src.image_renderer import MemeImageRenderer
+from .src.meme_client import MemeApiClient
+from .src.plugin_config import MemePluginConfig
+from .src.repo_manager import MemeRepoManager
+from .src.usage_stats import MemeUsageStats
 
 TEMP_IMAGE_TTL_SECONDS = 3600
 TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS = 300
-MAX_IMAGE_DOWNLOAD_CONCURRENCY = 4
 MEME_API_RESTART_REFRESH_ATTEMPTS = 6
 MEME_API_RESTART_REFRESH_INTERVAL_SECONDS = 5
 MIRAGETANK_KEY = "miragetank"
@@ -60,62 +50,13 @@ QUOTE_PAIRS = {
 }
 
 
-def _format_range(min_value: int, max_value: int) -> str:
-    return str(min_value) if min_value == max_value else f"{min_value} ~ {max_value}"
-
-
-def _format_keywords(keywords: list[str]) -> str:
-    return "、".join(f"“{keyword}”" for keyword in keywords)
-
-
-class ArgSyntaxError(Exception):
-    pass
-
-
-def split_arg_string(arg_string: str) -> list[str]:
-    args = []
-    current = []
-    in_quote = None
-    out_quote = None
-    escape_next = False
-
-    for char in arg_string:
-        if escape_next:
-            current.append(char)
-            escape_next = False
-            continue
-        if char == "\\":
-            escape_next = True
-            continue
-        if in_quote:
-            if char == out_quote:
-                in_quote = None
-                out_quote = None
-            else:
-                current.append(char)
-            continue
-        if char in QUOTE_PAIRS:
-            in_quote = char
-            out_quote = QUOTE_PAIRS[char]
-        elif char.isspace():
-            if current:
-                args.append("".join(current))
-                current.clear()
-        else:
-            current.append(char)
-
-    if escape_next:
-        raise ArgSyntaxError("参数转义符不能位于末尾")
-    if current:
-        args.append("".join(current))
-    if in_quote:
-        raise ArgSyntaxError(f"参数引号未闭合：{in_quote}")
-    return args
-
-
 class PokeToBotFilter(CustomFilter):
+    """Filter that matches events where the user double-taps/pokes the bot."""
+
     def filter(self, event: AstrMessageEvent, cfg: CoreAstrBotConfig) -> bool:
-        return MemeUpdater._is_poke_to_bot_event(event)
+        from .src.platform_utils import is_poke_to_bot_event
+
+        return is_poke_to_bot_event(event)
 
 
 @register(
@@ -125,7 +66,15 @@ class PokeToBotFilter(CustomFilter):
     "0.2.7",
 )
 class MemeUpdater(Star):
+    """The main plugin controller for managing and rendering meme packages."""
+
     def __init__(self, context: Context, config: AstrBotConfig):
+        """Initializes the MemeUpdater plugin instance.
+
+        Args:
+            context: The AstrBot Context instance.
+            config: The plugin AstrBotConfig instance.
+        """
         super().__init__(context)
         self.config = config
         self._meme_infos: dict[str, dict] = {}
@@ -181,135 +130,7 @@ class MemeUpdater(Star):
             "删除屏蔽表情",
         )
 
-    async def _all_meme_infos_for_disabled_web(self) -> dict[str, dict]:
-        await self._refresh_meme_infos()
-        return self.meme_infos
-
-    async def web_get_disabled_memes(self):
-        try:
-            all_meme_infos = await self._all_meme_infos_for_disabled_web()
-            global_names = self.plugin_config.disabled_meme_names()
-            groups = {}
-            for group_id, names in self.plugin_config.disabled_meme_groups().items():
-                display_names = self.disabled_memes.disabled_display_names(
-                    all_meme_infos, names
-                )
-                groups[group_id] = {"count": len(display_names), "items": display_names}
-            global_display_names = self.disabled_memes.disabled_display_names(
-                all_meme_infos, global_names
-            )
-            return jsonify(
-                {
-                    "global": {
-                        "count": len(global_display_names),
-                        "items": global_display_names,
-                    },
-                    "groups": groups,
-                    "group_names": self.usage_stats.normalize(
-                        self.usage_stats.load()
-                    ).get("group_names", {}),
-                }
-            )
-        except Exception as e:
-            logger.error(f"Plugin Page 获取屏蔽表情列表失败: {e}")
-            return jsonify(
-                {
-                    "global": {"count": 0, "items": []},
-                    "groups": {},
-                    "group_names": {},
-                    "error": str(e),
-                }
-            )
-
-    async def _disabled_meme_params(self) -> dict:
-        payload = {}
-        try:
-            if request.is_json:
-                data = await request.get_json(silent=True)
-                if isinstance(data, dict):
-                    payload.update(data)
-        except Exception:
-            pass
-        payload.update(request.args)
-        try:
-            form = await request.form
-            payload.update(form)
-        except Exception:
-            pass
-        return payload
-
-    def _disabled_meme_scope(self, params: dict) -> str:
-        scope = str(params.get("scope", "global")).strip()
-        group_id = str(params.get("group_id", "")).strip()
-        return group_id if scope == "group" and group_id else ""
-
-    async def web_add_disabled_meme(self):
-        try:
-            params = await self._disabled_meme_params()
-            name = str(params.get("name", "")).strip()
-            if not name:
-                return jsonify(
-                    {"success": False, "message": "未提供表情名或关键词"}
-                ), 400
-            group_id = self._disabled_meme_scope(params)
-            all_meme_infos = await self._all_meme_infos_for_disabled_web()
-            result = self.disabled_memes.disable(group_id, name, all_meme_infos)
-            if result.status == "not_found":
-                return jsonify(
-                    {"success": False, "message": f"未找到表情：{name}"}
-                ), 404
-            if result.status == "already_disabled":
-                return jsonify(
-                    {
-                        "success": True,
-                        "message": "已在屏蔽列表中",
-                        "status": result.status,
-                    }
-                )
-            return jsonify(
-                {
-                    "success": True,
-                    "message": f"已屏蔽 {result.display_name}",
-                    "status": result.status,
-                }
-            )
-        except Exception as e:
-            logger.error(f"Plugin Page 添加屏蔽表情失败: {e}")
-            return jsonify({"success": False, "message": str(e)}), 500
-
-    async def web_delete_disabled_meme(self):
-        try:
-            params = await self._disabled_meme_params()
-            name = str(params.get("name", "")).strip()
-            if not name:
-                return jsonify(
-                    {"success": False, "message": "未提供表情名或关键词"}
-                ), 400
-            group_id = self._disabled_meme_scope(params)
-            all_meme_infos = await self._all_meme_infos_for_disabled_web()
-            result = self.disabled_memes.enable(group_id, name, all_meme_infos)
-            if result.status == "not_found":
-                return jsonify(
-                    {"success": False, "message": f"未找到表情：{name}"}
-                ), 404
-            if result.status == "not_disabled":
-                return jsonify(
-                    {
-                        "success": True,
-                        "message": "不在屏蔽列表中",
-                        "status": result.status,
-                    }
-                )
-            return jsonify(
-                {
-                    "success": True,
-                    "message": f"已取消屏蔽 {result.display_name}",
-                    "status": result.status,
-                }
-            )
-        except Exception as e:
-            logger.error(f"Plugin Page 删除屏蔽表情失败: {e}")
-            return jsonify({"success": False, "message": str(e)}), 500
+    # Property Getters / Setters
 
     @property
     def meme_infos(self) -> dict[str, dict]:
@@ -327,118 +148,23 @@ class MemeUpdater(Star):
     def meme_shortcuts(self, value: list[dict]):
         self._meme_shortcuts = value
 
-    def _is_allowed_group(self, event: AstrMessageEvent) -> bool:
-        whitelist = self.plugin_config.meme_group_whitelist()
-        if not whitelist:
-            return True
-
-        group_id = self._group_id(event)
-
-        # Only intercept when explicitly in a group chat and the group ID is not in the whitelist
-        if group_id and group_id not in whitelist:
-            return False
-
-        return True
-
-    def _format_time(self, dt: datetime) -> str:
-        return f"{dt.year}/{dt.month}/{dt.day} {dt:%H:%M:%S}"
-
-    async def _refresh_meme_infos(self, force: bool = False) -> int:
-        async with self._meme_info_lock:
-            if self.meme_infos and not force:
-                return len(self.meme_infos)
-            meme_infos = await self.meme_client.fetch_meme_infos()
-            self.meme_infos = dict(meme_infos.items())
-            self._refresh_meme_shortcuts()
-            logger.info(
-                f"meme API 表情信息刷新完成，共载入 {len(self.meme_infos)} 个表情"
-            )
-            return len(self.meme_infos)
-
-    async def _refresh_meme_infos_after_restart(self, lines: list[str]) -> None:
-        for attempt in range(1, MEME_API_RESTART_REFRESH_ATTEMPTS + 1):
-            if attempt > 1:
-                await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
-            try:
-                count = await self._refresh_meme_infos(force=True)
-                lines.append(f"✅ 已刷新表情信息，共载入 {count} 个表情")
-                return
-            except Exception as e:
-                if attempt == MEME_API_RESTART_REFRESH_ATTEMPTS:
-                    lines.append(f"⚠️ 刷新表情信息失败：{e}")
-                else:
-                    retry_line = f"⏳ meme API 尚未就绪，{MEME_API_RESTART_REFRESH_INTERVAL_SECONDS} 秒后重试刷新表情信息（外层第 {attempt}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次）"
-                    logger.warning(
-                        f"重启后刷新表情信息失败，准备重试外层第 {attempt}/{MEME_API_RESTART_REFRESH_ATTEMPTS} 次：{e}"
-                    )
-                    lines.append(retry_line)
-
-    def _ensure_meme_info_refresh_task(self) -> asyncio.Task | None:
-        if self.meme_infos:
-            return None
-        task = self._meme_info_refresh_task
-        if task and not task.done():
-            return task
-        if task and task.done():
-            try:
-                task.result()
-            except Exception as e:
-                logger.warning(f"后台刷新 meme API 表情信息失败: {e}")
-        self._meme_info_refresh_task = asyncio.create_task(self._refresh_meme_infos())
-        self._meme_info_refresh_task.add_done_callback(
-            self._log_background_task_result
-        )
-        return self._meme_info_refresh_task
-
-    def _log_background_task_result(self, task: asyncio.Task) -> None:
-        # 作为 fire-and-forget 任务的 done 回调，显式消费异常，
-        # 避免 asyncio "Task exception was never retrieved" 告警。
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.warning(f"后台任务异常退出：{exc}")
-
-    async def _temp_cleanup_loop(self):
-        # 常驻后台定期清理过期临时图片，与用户请求解耦：
-        # 即便长时间无人生成表情，旧文件也能按 TTL 被回收。启动即先扫一次，
-        # 不必等待首个间隔。
-        while True:
-            try:
-                temp_dir = os.path.join(self._meme_data_dir, "temp")
-                if os.path.isdir(temp_dir):
-                    await asyncio.to_thread(self._cleanup_temp_images, temp_dir)
-                    self._last_temp_cleanup = time.time()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.debug(f"后台清理临时图片失败：{e}")
-            await asyncio.sleep(TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS)
+    # Lifecycle Methods
 
     async def initialize(self):
-        # 插件加载后立即在后台预热表情信息，避免第一条消息到来时才触发初始化。
+        """Asynchronously initializes the plugin resources on load."""
         self._ensure_meme_info_refresh_task()
-        if self._temp_cleanup_task is None or self._temp_cleanup_task.done():
-            self._temp_cleanup_task = asyncio.create_task(self._temp_cleanup_loop())
-            self._temp_cleanup_task.add_done_callback(
-                self._log_background_task_result
-            )
+        self._temp_cleanup_task = asyncio.create_task(self._temp_cleanup_loop())
 
     async def terminate(self):
-        for attr in ("_meme_info_refresh_task", "_temp_cleanup_task"):
-            task = getattr(self, attr, None)
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            setattr(self, attr, None)
-        try:
-            await self.meme_client.close()
-        except Exception as e:
-            logger.debug(f"关闭 meme API session 失败：{e}")
-        if self._download_session is not None and not self._download_session.closed:
+        """Asynchronously cleans up the plugin resources on unload."""
+        if self._temp_cleanup_task:
+            self._temp_cleanup_task.cancel()
+            try:
+                await self._temp_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._temp_cleanup_task = None
+        if self._download_session and not self._download_session.closed:
             try:
                 await self._download_session.close()
             except Exception as e:
@@ -450,6 +176,277 @@ class MemeUpdater(Star):
             if asyncio.iscoroutine(result):
                 await result
 
+    # State Cache refreshing
+
+    async def _refresh_meme_infos(self, force: bool = False) -> int:
+        """Refreshes the internal meme metadata info cache from the memeapi backend.
+
+        Args:
+            force: If True, forces refresh even if cached data already exists.
+
+        Returns:
+            The count of cached memes.
+        """
+        if not force and self._meme_infos:
+            return len(self._meme_infos)
+        async with self._meme_info_lock:
+            if not force and self._meme_infos:
+                return len(self._meme_infos)
+            try:
+                infos = await self.meme_client.get_meme_infos()
+                self.meme_infos = infos
+                self._refresh_meme_shortcuts()
+                return len(infos)
+            except Exception as e:
+                logger.error(f"加载 meme API 表情信息失败: {e}")
+                raise
+
+    async def _refresh_meme_infos_after_restart(self, lines: list[str]) -> None:
+        """Refreshes meme info after a restart with retries.
+
+        Args:
+            lines: Log summary line builder array.
+        """
+        attempts = MEME_API_RESTART_REFRESH_ATTEMPTS
+        for attempt in range(attempts):
+            try:
+                count = await self._refresh_meme_infos(force=True)
+                lines.append(f"✅ 表情信息刷新完成，共载入 {count} 个表情。")
+                return
+            except Exception as e:
+                if attempt == attempts - 1:
+                    lines.append(f"❌ 刷新表情信息失败，已达最大尝试次数：{e}")
+                else:
+                    lines.append(
+                        f"⏳ 刷新表情信息失败，等待重试 ({attempt + 1}/{attempts})..."
+                    )
+                    await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
+
+    def _ensure_meme_info_refresh_task(self) -> asyncio.Task | None:
+        """Ensures the background refresh task is running if info is not yet loaded.
+
+        Returns:
+            The refresh Task instance, or None.
+        """
+        if self._meme_infos:
+            return None
+        if self._meme_info_refresh_task and not self._meme_info_refresh_task.done():
+            return self._meme_info_refresh_task
+        task = asyncio.create_task(self._refresh_meme_infos())
+        task.add_done_callback(self._log_background_task_result)
+        self._meme_info_refresh_task = task
+        return task
+
+    def _log_background_task_result(self, task: asyncio.Task) -> None:
+        """Logs exceptions if the background refresh task fails.
+
+        Args:
+            task: The completed task.
+        """
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"后台任务执行失败: {e}")
+
+    async def _temp_cleanup_loop(self):
+        """Background loop cleaning up expired generated images periodically."""
+        temp_dir = os.path.join(self._meme_data_dir, "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        while True:
+            try:
+                await asyncio.sleep(TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS)
+                now = time.time()
+                from .src.commands import _cleanup_temp_images
+
+                _cleanup_temp_images(temp_dir, now)
+                self._last_temp_cleanup = now
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"清理临时图片后台任务异常: {e}")
+
+    def _ensure_download_session(self) -> aiohttp.ClientSession:
+        if self._download_session is None or self._download_session.closed:
+            self._download_session = aiohttp.ClientSession()
+        return self._download_session
+
+    # Web APIs
+
+    async def web_get_disabled_memes(self):
+        from .src.web_api import web_get_disabled_memes
+
+        return await web_get_disabled_memes(self)
+
+    async def web_add_disabled_meme(self):
+        from .src.web_api import web_add_disabled_meme
+
+        return await web_add_disabled_meme(self)
+
+    async def web_delete_disabled_meme(self):
+        from .src.web_api import web_delete_disabled_meme
+
+        return await web_delete_disabled_meme(self)
+
+    # Command implementation stubs
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("重启memeapi")
+    async def restart_memeapi(self, event: AstrMessageEvent):
+        from .src.commands import restart_memeapi
+
+        async for res in restart_memeapi(self, event):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("更新表情包")
+    async def update_memes(self, event: AstrMessageEvent):
+        from .src.commands import update_memes
+
+        async for res in update_memes(self, event):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("表情包状态")
+    async def meme_status(self, event: AstrMessageEvent):
+        from .src.commands import meme_status
+
+        async for res in meme_status(self, event):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("刷新表情信息")
+    async def refresh_meme_infos(self, event: AstrMessageEvent):
+        from .src.commands import refresh_meme_infos
+
+        async for res in refresh_meme_infos(self, event):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("屏蔽表情")
+    async def disable_meme(self, event: AstrMessageEvent):
+        from .src.commands import set_meme_disabled
+
+        async for res in set_meme_disabled(self, event, "屏蔽表情"):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("取消屏蔽表情")
+    async def enable_meme(self, event: AstrMessageEvent):
+        from .src.commands import unset_meme_disabled
+
+        async for res in unset_meme_disabled(self, event, "取消屏蔽表情"):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局屏蔽表情")
+    async def disable_meme_globally(self, event: AstrMessageEvent):
+        from .src.commands import set_meme_disabled
+
+        async for res in set_meme_disabled(
+            self, event, "全局屏蔽表情", force_global=True
+        ):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("取消全局屏蔽表情")
+    async def enable_meme_globally(self, event: AstrMessageEvent):
+        from .src.commands import unset_meme_disabled
+
+        async for res in unset_meme_disabled(
+            self, event, "取消全局屏蔽表情", force_global=True
+        ):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("屏蔽表情列表")
+    async def list_disabled_memes(self, event: AstrMessageEvent):
+        from .src.commands import list_disabled_memes
+
+        args = self._get_message_args(event, "屏蔽表情列表")
+        group_id = self._block_list_scope_from_args(event, args)
+        async for res in list_disabled_memes(self, event, group_id):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局屏蔽表情列表")
+    async def list_global_disabled_memes(self, event: AstrMessageEvent):
+        from .src.commands import list_disabled_memes
+
+        async for res in list_disabled_memes(self, event, ""):
+            yield res
+
+    @filter.command("表情统计")
+    async def meme_usage_stats(self, event: AstrMessageEvent):
+        from .src.commands import meme_usage_stats
+
+        async for res in meme_usage_stats(self, event):
+            yield res
+
+    @filter.command("总表情统计")
+    async def meme_global_usage_stats(self, event: AstrMessageEvent):
+        from .src.commands import meme_global_usage_stats
+
+        async for res in meme_global_usage_stats(self, event):
+            yield res
+
+    @filter.command("meme搜索")
+    async def meme_search(self, event: AstrMessageEvent):
+        from .src.commands import meme_search
+
+        async for res in meme_search(self, event):
+            yield res
+
+    @filter.command("表情列表")
+    async def meme_list(self, event: AstrMessageEvent):
+        from .src.commands import meme_list
+
+        async for res in meme_list(self, event):
+            yield res
+
+    @filter.command("表情详情")
+    async def meme_info(self, event: AstrMessageEvent):
+        from .src.commands import meme_info
+
+        async for res in meme_info(self, event):
+            yield res
+
+    @filter.command("制作表情")
+    async def meme_generate(self, event: AstrMessageEvent):
+        from .src.commands import meme_generate
+
+        async for res in meme_generate(self, event):
+            yield res
+
+    @filter.custom_filter(PokeToBotFilter)
+    async def meme_poke_random_listener(self, event: AstrMessageEvent):
+        from .src.commands import meme_poke_random_listener
+
+        async for res in meme_poke_random_listener(self, event):
+            yield res
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def meme_shortcut_listener(self, event: AstrMessageEvent):
+        from .src.commands import meme_shortcut_listener
+
+        async for res in meme_shortcut_listener(self, event):
+            yield res
+
+    # Metadata & Config Helpers
+
+    def _is_allowed_group(self, event: AstrMessageEvent) -> bool:
+        group_id = self._group_id(event)
+        if not group_id:
+            return True
+        allowed_groups = self.plugin_config.meme_allowed_groups()
+        if not allowed_groups:
+            return True
+        return group_id in allowed_groups
+
+    def _format_time(self, dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
     def _regex_first_literal(self, regex: str) -> str | None:
         if not regex:
             return None
@@ -460,8 +457,6 @@ class MemeUpdater(Star):
         return regex[0]
 
     def _is_dangerous_regex(self, regex: str) -> bool:
-        # 上游仓库的 shortcut 正则用标准 re 编译，无超时保护。
-        # 拒绝嵌套量词（如 (a+)+、(a*)*、(a+)*），避免灾难性回溯打满 CPU。
         return bool(
             re.search(r"\([^()]*[+*][^()]*\)\s*[+*]", regex)
             or re.search(r"\([^()]*[+*][^()]*\)\{", regex)
@@ -592,6 +587,8 @@ class MemeUpdater(Star):
     def _block_scope_from_args(
         self, event: AstrMessageEvent, args: str
     ) -> tuple[str, str]:
+        from .src.arg_parser import split_arg_string
+
         parts = split_arg_string(args)
         if len(parts) >= 2 and re.fullmatch(r"\d{5,20}", parts[0]):
             return parts[0], " ".join(parts[1:])
@@ -631,1907 +628,83 @@ class MemeUpdater(Star):
         group_name = await self._lookup_group_name(event, group_id)
         return f"群 {group_name}（{group_id}）" if group_name else f"群 {group_id}"
 
-    def _get_message_args(self, event: AstrMessageEvent, command_name: str) -> str:
-        message = self._extract_message_text(event)
-        if not message:
-            return ""
-
-        # 优先处理带有空格的情况，支持 "小祥 meme搜索 举牌" 或 "catmeme搜索 举牌"
-        parts = message.split(maxsplit=1)
-        if parts:
-            p0 = parts[0].lstrip("#/％%")
-            if p0 == command_name or p0.endswith(command_name):
-                return parts[1] if len(parts) > 1 else ""
-
-        # 处理没有空格的情况，或者上述匹配失败的情况，如 "catmeme搜索举牌"
-        idx = message.find(command_name)
-        if idx != -1:
-            # 找到指令位置，截取之后的部分作为参数
-            return message[idx + len(command_name) :].strip()
-
-        return ""
-
-    def _set_direction_option(self, options: dict[str, object], direction: str) -> None:
-        existing = options.get("__direction")
-        if existing and existing != direction:
-            raise ArgSyntaxError(f"方向参数冲突：{existing} 与 {direction}")
-        options["__direction"] = direction
-
-    def _direction_options_for_key(self, direction: str) -> dict[str, object]:
-        return {"direction": direction}
-
-    def _materialize_direction_options(
-        self, options: dict[str, object]
-    ) -> dict[str, object]:
-        direction = options.get("__direction")
-        if not direction:
-            return options
-        resolved = {
-            name: value
-            for name, value in options.items()
-            if name
-            not in {"__direction", "left", "right", "top", "bottom", "direction"}
-        }
-        resolved.update(self._direction_options_for_key(str(direction)))
-        return resolved
-
-    def _normalize_meme_options(
-        self, tokens: list[str]
-    ) -> tuple[list[str], dict[str, object]]:
-        options: dict[str, object] = {}
-        remaining = []
-        for token in tokens:
-            if token in {"右", "#右"}:
-                self._set_direction_option(options, "right")
-                continue
-            if token in {"左", "#左"}:
-                self._set_direction_option(options, "left")
-                continue
-            if token in {"上", "#上"}:
-                self._set_direction_option(options, "top")
-                continue
-            if token in {"下", "#下"}:
-                self._set_direction_option(options, "bottom")
-                continue
-            if token.startswith("#") and len(token) > 1:
-                if re.fullmatch(r"#[A-Za-z_][\w-]*=.+", token):
-                    name, value = token[1:].split("=", 1)
-                    options[name.replace("-", "_")] = value
-                else:
-                    options[token[1:]] = True
-                continue
-            if re.fullmatch(r"[A-Za-z_][\w-]*=.+", token):
-                name, value = token.split("=", 1)
-                options[name.replace("-", "_")] = value
-                continue
-            remaining.append(token)
-        return remaining, options
-
     def _direction_options_from_text(self, key: str, text: str) -> dict[str, object]:
-        compact = text.replace(" ", "").replace("#", "")
-        if key == "symmetry":
-            if compact.startswith("对称右"):
-                return self._direction_options_for_key("right")
-            if compact.startswith("对称左"):
-                return self._direction_options_for_key("left")
-            if compact.startswith("对称上"):
-                return self._direction_options_for_key("top")
-            if compact.startswith("对称下"):
-                return self._direction_options_for_key("bottom")
-        return {}
+        from .src.arg_parser import direction_options_from_text
 
-    def _avatar_url(self, user_id: str) -> str:
-        if not user_id:
-            return ""
-        return QQ_AVATAR_URL_TEMPLATE.format(user_id=quote(str(user_id), safe=""))
-
-    def _sender_id(self, event: AstrMessageEvent) -> str:
-        message_obj = getattr(event, "message_obj", None)
-        raw_event = self._raw_event_dict_from_event(event)
-        user_id = str(raw_event.get("user_id") or "").strip()
-        if user_id:
-            return user_id
-        for source in (message_obj, event):
-            for name in ("user_id", "sender_id"):
-                user_id = str(getattr(source, name, "") or "").strip()
-                if user_id:
-                    return user_id
-        try:
-            return str(event.get_sender_id() or "").strip()
-        except Exception:
-            return ""
-
-    def _sender_avatar_url(self, event: AstrMessageEvent) -> str:
-        return self._avatar_url(self._sender_id(event))
-
-    def _bot_id(self, event: AstrMessageEvent) -> str:
-        message_obj = getattr(event, "message_obj", None)
-        raw_event = self._raw_event_dict_from_event(event)
-        bot_id = str(raw_event.get("self_id") or raw_event.get("bot_id") or "").strip()
-        if bot_id:
-            return bot_id
-        return str(
-            getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or ""
-        ).strip()
-
-    def _bot_avatar_url(self, event: AstrMessageEvent) -> str:
-        return self._avatar_url(self._bot_id(event))
-
-    def _group_id(self, event: AstrMessageEvent) -> str:
-        try:
-            group_id = str(event.get_group_id() or "").strip()
-            if group_id:
-                return group_id
-        except Exception:
-            pass
-        message_obj = getattr(event, "message_obj", None)
-        raw_message = self._raw_event_dict_from_event(event)
-        if isinstance(raw_message, dict):
-            group_id = str(
-                raw_message.get("group_id") or raw_message.get("group") or ""
-            ).strip()
-            if group_id:
-                return group_id
-        for source in (message_obj, event):
-            group_id = str(
-                getattr(source, "group_id", "") or getattr(source, "group", "") or ""
-            ).strip()
-            if group_id:
-                return group_id
-        return ""
-
-    def _group_name_from_event(self, event: AstrMessageEvent, group_id: str) -> str:
-        message_obj = getattr(event, "message_obj", None)
-        raw_message = self._raw_event_dict_from_event(event)
-        names = []
-        if isinstance(raw_message, dict):
-            for key in (
-                "group_name",
-                "group_card",
-                "group_title",
-                "name",
-                "title",
-                "chat_name",
-            ):
-                value = str(raw_message.get(key) or "").strip()
-                if value:
-                    names.append(value)
-        for source in (message_obj, event):
-            for attr in (
-                "group_name",
-                "group_card",
-                "group_title",
-                "name",
-                "title",
-                "chat_name",
-            ):
-                value = str(getattr(source, attr, "") or "").strip()
-                if value:
-                    names.append(value)
-        return next((name for name in names if name and name != group_id), "")
-
-    async def _lookup_group_name(
-        self, event: AstrMessageEvent | None, group_id: str
-    ) -> str:
-        if event is None or not group_id:
-            return ""
-        try:
-            group_data = await event.get_group(group_id)
-            return self._name_from_group_info(group_data, group_id) or ""
-        except Exception as e:
-            logger.debug(f"event.get_group 获取群名失败: {e}")
-            return ""
-
-    async def _lookup_sender_name(self, event: AstrMessageEvent, user_id: str) -> str:
-        bot = getattr(event, "bot", None)
-        if not bot or not user_id:
-            return ""
-        group_id = self._group_id(event)
-        query_user_id = int(user_id) if user_id.isdigit() else user_id
-        query_group_id = int(group_id) if group_id.isdigit() else group_id
-        calls = []
-        if group_id:
-            calls.extend(
-                (
-                    (
-                        "get_group_member_info",
-                        {
-                            "group_id": query_group_id,
-                            "user_id": query_user_id,
-                            "no_cache": False,
-                        },
-                    ),
-                    (
-                        "get_group_member",
-                        {"group_id": query_group_id, "user_id": query_user_id},
-                    ),
-                )
-            )
-        calls.extend(
-            (
-                ("get_stranger_info", {"user_id": query_user_id, "no_cache": False}),
-                ("get_friend_info", {"user_id": query_user_id}),
-            )
-        )
-
-        for action, params in calls:
-            for info in await self._call_bot_action_candidates(bot, action, params):
-                name = self._name_from_user_info(info, user_id)
-                if name:
-                    return name
-        return ""
-
-    async def _call_bot_action_candidates(
-        self, bot: object, action: str, params: dict
-    ) -> list[object]:
-        results = []
-        method = getattr(bot, action, None)
-        if callable(method):
-            try:
-                results.append(await method(**params))
-            except Exception as e:
-                logger.debug(f"调用 {action} 失败: {e}")
-        api = getattr(bot, "api", None)
-        api_call_action = getattr(api, "call_action", None)
-        if callable(api_call_action):
-            try:
-                results.append(await api_call_action(action, **params))
-            except Exception as e:
-                logger.debug(f"调用 api.{action} 失败: {e}")
-        call_action = getattr(bot, "call_action", None)
-        if callable(call_action):
-            try:
-                results.append(await call_action(action, **params))
-            except Exception as e:
-                logger.debug(f"调用 {action} 失败: {e}")
-        return results
-
-    async def _try_send_forward_message(
-        self, event: AstrMessageEvent, title: str, content: str, count: int
-    ) -> bool:
-        bot = getattr(event, "bot", None)
-        if not bot or not content:
-            return False
-        group_id = self._group_id(event)
-        user_id = self._sender_id(event)
-        bot_id = self._bot_id(event) or "0"
-        nodes = [
-            {"type": "node", "data": {"name": title, "uin": bot_id, "content": content}}
-        ]
-        metadata = {
-            "prompt": "表情搜索结果",
-            "summary": f"查看 {count} 条搜索结果",
-            "source": "meme搜索",
-        }
-        if group_id:
-            target = int(group_id) if group_id.isdigit() else group_id
-            calls = [
-                (
-                    "send_group_forward_msg",
-                    {"group_id": target, "messages": nodes, **metadata},
-                )
-            ]
-        elif user_id:
-            target = int(user_id) if user_id.isdigit() else user_id
-            calls = [
-                (
-                    "send_private_forward_msg",
-                    {"user_id": target, "messages": nodes, **metadata},
-                )
-            ]
-        else:
-            return False
-        for action, params in calls:
-            call_action = getattr(bot, "call_action", None)
-            if callable(call_action):
-                try:
-                    await call_action(action, **params)
-                    return True
-                except Exception as e:
-                    # 不要 continue：calls 仅一个元素，continue 会直接结束循环，
-                    # 跳过下面紧接着的 bot.<action>(**params) 直调降级。
-                    logger.debug(f"调用 {action} 失败，尝试直调降级: {e}")
-            method = getattr(bot, action, None)
-            if callable(method):
-                try:
-                    await method(**params)
-                    return True
-                except Exception as e:
-                    logger.debug(f"调用 {action} 失败: {e}")
-        return False
-
-    def _name_from_group_info(self, info: object, group_id: str) -> str:
-        if isinstance(info, dict):
-            data = info.get("data")
-            if isinstance(data, dict):
-                name = self._name_from_group_info(data, group_id)
-                if name:
-                    return name
-            for key in (
-                "group_name",
-                "group_card",
-                "name",
-                "group_title",
-                "title",
-                "chat_name",
-                "nickname",
-            ):
-                value = str(info.get(key) or "").strip()
-                if value and value != group_id:
-                    return value
-            return ""
-        for attr in (
-            "group_name",
-            "group_card",
-            "name",
-            "group_title",
-            "title",
-            "chat_name",
-            "nickname",
-        ):
-            value = str(getattr(info, attr, "") or "").strip()
-            if value and value != group_id:
-                return value
-        return ""
-
-    def _name_from_user_info(self, info: object, user_id: str) -> str:
-        if not isinstance(info, dict):
-            return ""
-        for key in ("card", "nickname", "user_name", "name", "remark"):
-            value = str(info.get(key) or "").strip()
-            if value and value != user_id:
-                return value
-        data = info.get("data")
-        if isinstance(data, dict):
-            return self._name_from_user_info(data, user_id)
-        return ""
-
-    async def _sender_user_info(self, event: AstrMessageEvent) -> dict:
-        names = []
-        message_obj = getattr(event, "message_obj", None)
-        sender = getattr(message_obj, "sender", None)
-        sender_id = self._sender_id(event)
-
-        for source in (sender, message_obj, event):
-            if not source:
-                continue
-            for attr in ("card", "nickname", "user_name", "name", "sender_name"):
-                value = str(getattr(source, attr, "") or "").strip()
-                if value:
-                    names.append(value)
-
-        raw_message = self._raw_event_dict_from_event(event)
-        if isinstance(raw_message, dict):
-            raw_sender = raw_message.get("sender")
-            if isinstance(raw_sender, dict):
-                for key in ("card", "nickname", "user_name", "name"):
-                    value = str(raw_sender.get(key) or "").strip()
-                    if value:
-                        names.append(value)
-
-        try:
-            value = str(event.get_sender_name() or "").strip()
-            if value:
-                names.append(value)
-        except Exception:
-            pass
-
-        name = next((value for value in names if value and value != sender_id), "")
-        if not name:
-            name = await self._lookup_sender_name(event, sender_id)
-        return {"name": name or sender_id, "gender": "unknown"}
-
-    def _bot_user_info(self, event: AstrMessageEvent) -> dict:
-        bot_id = self._bot_id(event)
-        return {"name": bot_id or "机器人", "gender": "unknown"}
-
-    async def _read_limited_response(
-        self, resp: aiohttp.ClientResponse, limit: int | None = None
-    ) -> bytes:
-        max_bytes = limit or self.plugin_config.max_image_bytes()
-        chunks = []
-        total = 0
-        async for chunk in resp.content.iter_chunked(64 * 1024):
-            total += len(chunk)
-            if total > max_bytes:
-                raise RuntimeError(f"响应内容超过大小限制：{max_bytes} bytes")
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    def _is_forbidden_ip(self, address: str) -> bool:
-        try:
-            ip = ipaddress.ip_address(address)
-            return any(
-                (
-                    ip.is_loopback,
-                    ip.is_private,
-                    ip.is_link_local,
-                    ip.is_multicast,
-                    ip.is_reserved,
-                    ip.is_unspecified,
-                )
-            )
-        except ValueError:
-            return False
-
-    async def _validate_external_image_url(self, url: str) -> tuple[str, set[str]]:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            raise RuntimeError("图片 URL 只支持 http/https")
-        hostname = parsed.hostname
-        if not hostname:
-            raise RuntimeError("图片 URL 缺少主机名")
-        lowered = hostname.rstrip(".").lower()
-        if lowered == "localhost" or lowered.endswith(".localhost"):
-            raise RuntimeError("不允许访问本机地址")
-
-        if self._is_forbidden_ip(lowered):
-            raise RuntimeError("不允许访问内网或本机地址")
-        try:
-            infos = await asyncio.to_thread(
-                socket.getaddrinfo, hostname, parsed.port, type=socket.SOCK_STREAM
-            )
-        except socket.gaierror as e:
-            raise RuntimeError(f"图片 URL 域名解析失败：{e}") from e
-        resolved_ips = set()
-        for info in infos:
-            address = info[4][0]
-            resolved_ips.add(address)
-            if self._is_forbidden_ip(address):
-                raise RuntimeError("不允许访问解析到内网或本机的地址")
-        return lowered, resolved_ips
-
-    def _response_peer_ip(self, resp: aiohttp.ClientResponse) -> str:
-        connection = getattr(resp, "connection", None)
-        transport = getattr(connection, "transport", None)
-        if transport is None:
-            return ""
-        peername = transport.get_extra_info("peername")
-        if isinstance(peername, tuple) and peername:
-            return str(peername[0] or "")
-        return ""
-
-    def _validate_image_bytes(self, data: bytes, content_type: str) -> None:
-        signatures = {
-            "image/png": (b"\x89PNG\r\n\x1a\n",),
-            "image/jpeg": (b"\xff\xd8\xff",),
-            "image/gif": (b"GIF87a", b"GIF89a"),
-            "image/webp": (b"RIFF",),
-        }
-        prefixes = signatures.get(content_type)
-        if not prefixes:
-            return
-        if not any(data.startswith(prefix) for prefix in prefixes):
-            raise RuntimeError("下载内容与图片类型不匹配")
-        if content_type == "image/webp" and data[8:12] != b"WEBP":
-            raise RuntimeError("下载内容与图片类型不匹配")
-
-    def _ensure_download_session(self) -> aiohttp.ClientSession:
-        # 复用单个长生命周期 session 下载外部图片，利用 Keep-Alive 连接池。
-        # 不绑定默认超时，超时按请求传入；SSRF 校验仍逐请求在
-        # _request_external_image 中进行，与 session 复用无关。
-        if self._download_session is None or self._download_session.closed:
-            self._download_session = aiohttp.ClientSession()
-        return self._download_session
-
-    async def _request_external_image(
-        self,
-        session: aiohttp.ClientSession,
-        url: str,
-        timeout: aiohttp.ClientTimeout,
-    ) -> tuple[bytes, str]:
-        current_url = url
-        for _ in range(5):
-            _, resolved_ips = await self._validate_external_image_url(current_url)
-            async with session.get(
-                current_url, allow_redirects=False, timeout=timeout
-            ) as resp:
-                peer_ip = self._response_peer_ip(resp)
-                if peer_ip and self._is_forbidden_ip(peer_ip):
-                    raise RuntimeError("实际连接到了内网或本机地址")
-                if peer_ip and resolved_ips and peer_ip not in resolved_ips:
-                    raise RuntimeError("图片下载连接地址与校验结果不一致")
-                if not peer_ip:
-                    logger.debug(f"无法确认图片下载的实际连接地址，已使用 DNS 校验结果继续: {current_url}")
-                if 300 <= resp.status < 400:
-                    location = resp.headers.get("Location")
-                    if not location:
-                        raise RuntimeError("图片下载重定向缺少 Location")
-                    current_url = str(resp.url.join(location))
-                    continue
-                data = await self._read_limited_response(resp)
-                if resp.status >= 400:
-                    raise RuntimeError(f"下载图片失败：HTTP {resp.status}")
-                content_type = resp.headers.get("Content-Type", "image/png").split(
-                    ";", 1
-                )[0]
-                if not content_type.startswith("image/"):
-                    raise RuntimeError(f"下载内容不是图片：{content_type}")
-                self._validate_image_bytes(data, content_type)
-                return data, content_type
-        raise RuntimeError("图片下载重定向次数过多")
-
-    async def _download_image(self, url: str) -> tuple[bytes, str, str]:
-        timeout = aiohttp.ClientTimeout(total=self.plugin_config.meme_request_timeout())
-        session = self._ensure_download_session()
-        data, content_type = await self._request_external_image(session, url, timeout)
-        ext = mimetypes.guess_extension(content_type) or ".png"
-        return data, content_type, f"image{ext}"
-
-    def _extract_message_segments(self, event: AstrMessageEvent) -> list[object]:
-        return self._extract_segments_from_event(event)
-
-    async def _get_replied_message_segments(
-        self, event: AstrMessageEvent
-    ) -> list[object]:
-        for segment in self._extract_message_segments(event):
-            if isinstance(segment, dict):
-                if segment.get("type") != "reply":
-                    continue
-                data = segment.get("data") or {}
-                message_id = str(
-                    data.get("id") or data.get("message_id") or data.get("msg_id") or ""
-                ).strip()
-            else:
-                if hasattr(segment, "chain"):
-                    # If segment has its own chain (e.g. Comp.Reply), return its content directly
-                    chain = getattr(segment, "chain", [])
-                    return list(chain) if hasattr(chain, "__iter__") else [chain]
-                message_id = str(
-                    getattr(segment, "id", "")
-                    or getattr(segment, "message_id", "")
-                    or getattr(segment, "msg_id", "")
-                    or getattr(segment, "reply_id", "")
-                    or getattr(segment, "target", "")
-                    or ""
-                ).strip()
-                if not message_id:
-                    data = getattr(segment, "data", None)
-                    if isinstance(data, dict):
-                        message_id = str(
-                            data.get("id")
-                            or data.get("message_id")
-                            or data.get("msg_id")
-                            or ""
-                        ).strip()
-                if not message_id and not hasattr(segment, "chain"):
-                    continue
-            if not message_id:
-                logger.warning(
-                    f"获取引用消息失败：未找到引用消息 ID，segment={type(segment).__name__}"
-                )
-                return []
-            try:
-                msg = await event.bot.get_msg(message_id=int(message_id))
-            except Exception as e:
-                logger.warning(f"获取引用消息失败：message_id={message_id}，{e}")
-                return []
-            segments = msg.get("message", []) if isinstance(msg, dict) else []
-            return segments if isinstance(segments, list) else []
-        return []
-
-    def _extract_image_urls_from_segments(self, segments: list[object]) -> list[str]:
-        urls = []
-        for segment in segments:
-            if isinstance(segment, dict):
-                if segment.get("type") not in {"image", "mface"}:
-                    continue
-                data = segment.get("data", {})
-                candidates = [data.get("url"), data.get("file"), data.get("path")]
-            else:
-                candidates = [
-                    getattr(segment, "url", None),
-                    getattr(segment, "file", None),
-                    getattr(segment, "path", None),
-                ]
-            for candidate in candidates:
-                value = str(candidate or "").strip()
-                if value.startswith("http://") or value.startswith("https://"):
-                    urls.append(value)
-                    break
-        return urls
-
-    def _extract_message_image_urls(self, event: AstrMessageEvent) -> list[str]:
-        segments = [
-            segment
-            for segment in self._extract_message_segments(event)
-            if isinstance(segment, dict) or not hasattr(segment, "chain")
-        ]
-        return self._extract_image_urls_from_segments(segments)
-
-    @staticmethod
-    def _raw_event_dict_from_event(event: AstrMessageEvent) -> dict:
-        message_obj = getattr(event, "message_obj", None)
-        for value in (
-            getattr(message_obj, "raw_message", None),
-            getattr(message_obj, "raw_event", None),
-            getattr(message_obj, "raw", None),
-            getattr(event, "raw_message", None),
-            getattr(event, "raw_event", None),
-            getattr(event, "raw", None),
-        ):
-            if isinstance(value, dict):
-                return value
-        return {}
-
-    @staticmethod
-    def _extract_segments_from_event(event: AstrMessageEvent) -> list[object]:
-        get_messages = getattr(event, "get_messages", None)
-        if callable(get_messages):
-            try:
-                messages = get_messages()
-                if isinstance(messages, list):
-                    return messages
-                if messages is not None and not isinstance(
-                    messages, (str, bytes, dict)
-                ):
-                    try:
-                        return list(messages)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        message_obj = getattr(event, "message_obj", None)
-        for value in (
-            getattr(message_obj, "message", None),
-            getattr(message_obj, "raw_message", None),
-            getattr(event, "message", None),
-        ):
-            if isinstance(value, list):
-                return value
-            if isinstance(value, dict) and isinstance(value.get("message"), list):
-                return value["message"]
-        return []
-
-    @staticmethod
-    def _is_poke_to_bot_event(event: AstrMessageEvent) -> bool:
-        message_obj = getattr(event, "message_obj", None)
-        bot_id = str(
-            getattr(event, "self_id", "") or getattr(message_obj, "self_id", "")
-        ).strip()
-        for segment in MemeUpdater._extract_segments_from_event(event):
-            if isinstance(segment, dict):
-                seg_type = str(segment.get("type") or "").lower()
-                data = segment.get("data") or {}
-                target_id = (
-                    str(
-                        data.get("id") or data.get("qq") or data.get("target_id") or ""
-                    ).strip()
-                    if isinstance(data, dict)
-                    else ""
-                )
-            else:
-                seg_type = str(
-                    getattr(segment, "type", "") or getattr(segment, "_type", "") or ""
-                ).lower()
-                target_id = ""
-                target_method = getattr(segment, "target_id", None)
-                if callable(target_method):
-                    target_id = str(target_method() or "").strip()
-                if not target_id:
-                    target_id = str(
-                        getattr(segment, "id", "") or getattr(segment, "qq", "") or ""
-                    ).strip()
-            if (
-                seg_type.endswith("poke")
-                and target_id
-                and bot_id
-                and target_id == bot_id
-            ):
-                return True
-
-        raw = MemeUpdater._raw_event_dict_from_event(event)
-        if not raw:
-            return False
-        post_type = str(raw.get("post_type") or raw.get("type") or "").lower()
-        sub_type = str(
-            raw.get("sub_type")
-            or raw.get("notice_type")
-            or raw.get("event")
-            or raw.get("detail_type")
-            or ""
-        ).lower()
-        if post_type and post_type not in {"notice", "notify"}:
-            return False
-        if sub_type not in {"poke", "戳一戳"}:
-            return False
-        target_id = str(raw.get("target_id") or raw.get("target") or "").strip()
-        bot_id = bot_id or str(raw.get("self_id") or "").strip()
-        return bool(target_id and bot_id and target_id == bot_id)
-
-    @staticmethod
-    def _segment_type_name(segment_type: object) -> str:
-        value = getattr(segment_type, "value", None)
-        if value is not None:
-            return str(value).lower()
-        name = getattr(segment_type, "name", None)
-        if name is not None:
-            return str(name).lower()
-        return str(segment_type or "").lower()
-
-    @staticmethod
-    def _segment_text(segment: object) -> str:
-        if isinstance(segment, dict):
-            seg_type = MemeUpdater._segment_type_name(segment.get("type"))
-            data = segment.get("data") or {}
-            if seg_type in {"text", "plain"} and isinstance(data, dict):
-                return str(data.get("text") or "")
-            return ""
-        seg_type = MemeUpdater._segment_type_name(
-            getattr(segment, "type", "") or getattr(segment, "_type", "")
-        )
-        if seg_type not in {"plain", "text"}:
-            return ""
-        return str(getattr(segment, "text", "") or "")
-
-    def _extract_message_text(self, event: AstrMessageEvent) -> str:
-        text = "".join(
-            self._segment_text(segment)
-            for segment in self._extract_message_segments(event)
-        ).strip()
-        if text:
-            return text
-        message_obj = getattr(event, "message_obj", None)
-        for value in (
-            getattr(message_obj, "message", None),
-            getattr(event, "message", None),
-        ):
-            if isinstance(value, str):
-                return value.strip()
-        return ""
-
-    def _stop_event(self, event: AstrMessageEvent):
-        stop_event = getattr(event, "stop_event", None)
-        if callable(stop_event):
-            stop_event()
-
-    async def _yield_and_stop(self, event: AstrMessageEvent, result):
-        self._stop_event(event)
-        yield result
-
-    def _extract_at_ids_from_segments(self, segments: list[object]) -> list[str]:
-        user_ids = []
-        for segment in segments:
-            if isinstance(segment, dict):
-                seg_type = segment.get("type")
-                data = segment.get("data") or {}
-            else:
-                seg_type = getattr(segment, "type", None)
-                if seg_type == "reply" or hasattr(segment, "chain"):
-                    continue
-                qq_attr = getattr(segment, "qq", None)
-                if qq_attr is not None:
-                    seg_type = "at"
-                    data = {"qq": qq_attr}
-                else:
-                    data = getattr(segment, "data", None)
-            if seg_type not in {"at", "mention"} or not isinstance(data, dict):
-                continue
-            qq = str(
-                data.get("qq")
-                or data.get("user_id")
-                or data.get("uid")
-                or data.get("id")
-                or data.get("target")
-                or ""
-            ).strip()
-            if qq and qq != "all" and qq not in user_ids:
-                user_ids.append(qq)
-        return user_ids
-
-    def _extract_message_at_ids(self, event: AstrMessageEvent) -> list[str]:
-        user_ids = self._extract_at_ids_from_segments(
-            self._extract_message_segments(event)
-        )
-        text = self._extract_message_text(event)
-        for pattern in (
-            r"\[CQ:at,qq=(\d+)\]",
-            r"\[At:(\d+)\]",
-            r"@[^\s@/\(]+\((\d{5,})\)",
-            r"@[^\s@/]+/(\d{5,})",
-            r"@(?:CQ:at,qq=)?(\d{5,})",
-        ):
-            for qq in re.findall(pattern, text):
-                if qq not in user_ids:
-                    user_ids.append(qq)
-        sender_id = self._sender_id(event)
-        if sender_id and sender_id not in user_ids and text.startswith(("@", "＠")):
-            user_ids.insert(0, sender_id)
-        return user_ids
-
-    async def _resolve_generate_args(
-        self, event: AstrMessageEvent, tokens: list[str]
-    ) -> tuple[list[tuple[bytes, str, str]], list[str], list[dict]]:
-        replied_segments = await self._get_replied_message_segments(event)
-        image_urls = self._extract_image_urls_from_segments(replied_segments)
-        image_urls.extend(self._extract_message_image_urls(event))
-        user_infos = [{} for _ in image_urls]
-        avatar_urls = []
-        avatar_user_infos = []
-        texts = []
-        mention_patterns = (
-            r"^\[CQ:at,qq=\d+\]$",
-            r"^\[At:\d+\]$",
-            r"^@[^\s@/\(]+\(\d{5,}\)$",
-            r"^@[^\s@/]+/\d{5,}$",
-        )
-        for arg in tokens:
-            if any(re.fullmatch(pattern, arg) for pattern in mention_patterns):
-                continue
-            if arg in {"自己", "@自己"}:
-                avatar = self._sender_avatar_url(event)
-                if avatar:
-                    avatar_urls.append(avatar)
-                    avatar_user_infos.append(await self._sender_user_info(event))
-                continue
-            if re.fullmatch(r"https?://\S+", arg):
-                image_urls.append(arg)
-                user_infos.append({})
-                continue
-            if arg.startswith("@") and arg[1:].isdigit():
-                user_id = arg[1:]
-                avatar_urls.append(self._avatar_url(user_id))
-                avatar_user_infos.append(
-                    {
-                        "name": await self._lookup_sender_name(event, user_id)
-                        or user_id,
-                        "gender": "unknown",
-                    }
-                )
-                continue
-            texts.append(arg)
-        at_ids = self._extract_message_at_ids(event)
-        for user_id in at_ids:
-            avatar_urls.append(self._avatar_url(user_id))
-            avatar_user_infos.append(
-                {
-                    "name": await self._lookup_sender_name(event, user_id) or user_id,
-                    "gender": "unknown",
-                }
-            )
-        explicit_image_count = len(image_urls)
-        image_urls.extend(avatar_urls)
-        user_infos.extend(avatar_user_infos)
-        if image_urls:
-            hosts = []
-            for url in image_urls:
-                host = urlparse(url).hostname
-                hosts.append(host or "unknown")
-            logger.info(
-                f"meme 参数图片数量：{len(image_urls)}，来源域名：{hosts}，当前发送者={self._sender_id(event)}"
-            )
-        if image_urls:
-            semaphore = asyncio.Semaphore(MAX_IMAGE_DOWNLOAD_CONCURRENCY)
-
-            async def download(url: str):
-                async with semaphore:
-                    return await self._download_image(url)
-
-            download_results = await asyncio.gather(
-                *(download(url) for url in image_urls), return_exceptions=True
-            )
-            explicit_failures = [
-                result
-                for result in download_results[:explicit_image_count]
-                if isinstance(result, Exception)
-            ]
-            if explicit_failures:
-                failure = explicit_failures[0]
-                message = str(failure) or type(failure).__name__
-                raise RuntimeError(f"引用/输入图片下载失败：{message}")
-            images = [
-                result
-                for result in download_results
-                if not isinstance(result, Exception)
-            ]
-            user_infos = [
-                info
-                for info, result in zip(user_infos, download_results)
-                if not isinstance(result, Exception)
-            ]
-        else:
-            images = []
-        return list(images), texts, user_infos
-
-    async def _fill_sender_avatar_images(
-        self,
-        event: AstrMessageEvent,
-        images: list[tuple[bytes, str, str]],
-        user_infos: list[dict],
-        target_count: int,
-    ):
-        if (
-            not self.plugin_config.meme_auto_sender_avatar()
-            or len(images) >= target_count
-        ):
-            return
-        avatar = self._sender_avatar_url(event)
-        if not avatar:
-            return
-        data, content_type, filename = await self._download_image(avatar)
-        user_info = await self._sender_user_info(event)
-        while len(images) < target_count:
-            images.insert(0, (data, content_type, filename))
-            user_infos.insert(0, user_info)
-
-    async def _fill_default_avatar_images(
-        self,
-        event: AstrMessageEvent,
-        images: list[tuple[bytes, str, str]],
-        user_infos: list[dict],
-        target_count: int,
-    ):
-        if not self.plugin_config.meme_auto_sender_avatar() or images:
-            return
-        sender_avatar = self._sender_avatar_url(event)
-        bot_avatar = self._bot_avatar_url(event)
-        fill_items = []
-        if target_count >= 2 and bot_avatar:
-            fill_items.append((bot_avatar, self._bot_user_info(event)))
-        if sender_avatar:
-            fill_items.append((sender_avatar, await self._sender_user_info(event)))
-        if not fill_items:
-            return
-        avatar_cache: dict[str, tuple[bytes, str, str]] = {}
-        fill_index = 0
-        while len(images) < target_count:
-            url, user_info = fill_items[fill_index % len(fill_items)]
-            if url not in avatar_cache:
-                avatar_cache[url] = await self._download_image(url)
-            data, content_type, filename = avatar_cache[url]
-            images.append((data, content_type, filename))
-            user_infos.append(user_info)
-            fill_index += 1
-
-    def _select_render_images(
-        self,
-        images: list[tuple[bytes, str, str]],
-        user_infos: list[dict],
-        max_images: int,
-    ) -> tuple[list[tuple[bytes, str, str]], list[dict]]:
-        if max_images <= 0 or len(images) <= max_images:
-            return images, user_infos
-        selected_images = images[:max_images]
-        selected_user_infos = user_infos[:max_images]
-        return selected_images, selected_user_infos
-
-    def _safe_int(self, value: object, default: int = 0) -> int:
-        try:
-            if value is None or value == "":
-                return default
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _params_type(self, info: dict) -> dict:
-        params = info.get("params_type") or {}
-        return {
-            "min_images": self._safe_int(params.get("min_images")),
-            "max_images": self._safe_int(params.get("max_images")),
-            "min_texts": self._safe_int(params.get("min_texts")),
-            "max_texts": self._safe_int(params.get("max_texts")),
-            "default_texts": list(params.get("default_texts") or []),
-        }
-
-    def _format_meme_list_text(self, meme_infos: dict[str, dict] | None = None) -> str:
-        template = self.plugin_config.meme_list_text_template()
-        lines = []
-        for index, info in enumerate(self._sorted_meme_infos(meme_infos), 1):
-            keywords = "、".join(
-                str(value) for value in info.get("keywords", []) if str(value).strip()
-            )
-            line = template.format(
-                index=index,
-                key=info.get("key", ""),
-                keywords=keywords or self.disabled_memes.meme_display_name(info),
-            )
-            lines.append(line)
-        return "\n".join(lines)
-
-    async def _render_list(
-        self, meme_infos: dict[str, dict] | None = None
-    ) -> tuple[bytes, str]:
-        meme_list = []
-        now = datetime.now().timestamp()
-        for index, info in enumerate(self._sorted_meme_infos(meme_infos), 1):
-            labels = []
-            try:
-                created = self._parse_meme_time(info.get("date_created"))
-                if now - created <= 30 * 24 * 3600:
-                    labels.append("new")
-            except Exception:
-                pass
-            meme_list.append(
-                {
-                    "meme_key": info.get("key"),
-                    "disabled": False,
-                    "labels": labels,
-                    "index": index,
-                }
-            )
-        return await self.meme_client.render_list(
-            meme_list,
-            self.plugin_config.meme_list_text_template(),
-            timeout_total=self.plugin_config.meme_list_render_timeout(),
-        )
-
-    def _parse_meme_time(self, value: object) -> float:
-        if not value:
-            return 0.0
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            return 0.0
-
-    def _meme_keyword_sort_value(self, info: dict) -> str:
-        keywords = info.get("keywords")
-        if isinstance(keywords, list) and keywords:
-            return str(keywords[0]).lower()
-        return ""
+        return direction_options_from_text(key, text)
 
     def _sorted_meme_infos(
         self, meme_infos: dict[str, dict] | None = None
     ) -> list[dict]:
-        sort_by = self.plugin_config.meme_list_sort_by()
-        reverse = self.plugin_config.meme_list_sort_reverse()
-        infos = list((meme_infos or self.meme_infos).values())
-        if sort_by == "名称":
-            return sorted(
-                infos,
-                key=lambda info: str(info.get("key", "")).lower(),
-                reverse=reverse,
-            )
-        if sort_by == "关键词":
-            return sorted(infos, key=self._meme_keyword_sort_value, reverse=reverse)
-        if sort_by == "更新时间":
-            return sorted(
-                infos,
-                key=lambda info: self._parse_meme_time(info.get("date_modified")),
-                reverse=reverse,
-            )
-        return sorted(
-            infos,
-            key=lambda info: self._parse_meme_time(info.get("date_created")),
-            reverse=reverse,
-        )
+        from .src.commands import _sorted_meme_infos
 
-    def _image_component(self, data: bytes, content_type: str) -> Comp.Image:
-        ext = mimetypes.guess_extension(content_type) or ".png"
-        try:
-            temp_dir = os.path.join(self._meme_data_dir, "temp")
-            os.makedirs(temp_dir, exist_ok=True)
-            now = time.time()
-            # 常驻后台 _temp_cleanup_loop 是主清理权威；仅当其未在运行时
-            # （理论兜底）才在此内联清理，避免两条路径并发遍历同一目录。
-            cleanup_task = self._temp_cleanup_task
-            background_alive = cleanup_task is not None and not cleanup_task.done()
-            if (
-                not background_alive
-                and now - self._last_temp_cleanup >= TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS
-            ):
-                self._cleanup_temp_images(temp_dir, now)
-                self._last_temp_cleanup = now
-            with tempfile.NamedTemporaryFile(
-                suffix=ext, dir=temp_dir, delete=False
-            ) as tf:
-                tf.write(data)
-                temp_path = tf.name
-            temp_path = os.path.abspath(temp_path).replace("\\", "/")
-            return Comp.Image(file=f"file:///{temp_path}")
-        except Exception as e:
-            logger.warning(f"无法创建临时文件发送图片，降级到 base64: {e}")
-            b64 = base64.b64encode(data).decode("ascii")
-            return Comp.Image(file=f"base64://{b64}")
+        return _sorted_meme_infos(self, meme_infos)
 
-    def _cleanup_temp_images(self, temp_dir: str, now: float | None = None) -> None:
-        expires_before = (now or time.time()) - TEMP_IMAGE_TTL_SECONDS
-        for name in os.listdir(temp_dir):
-            path = os.path.join(temp_dir, name)
-            try:
-                if os.path.isfile(path) and os.path.getmtime(path) < expires_before:
-                    os.remove(path)
-            except OSError:
-                pass
+    def _safe_int(self, value: object, default: int = 0) -> int:
+        from .src.commands import _safe_int
 
-    def _shortcut_args(self, template_args: list, match: re.Match) -> str:
-        resolved = []
-        for value in template_args:
-            text = str(value)
+        return _safe_int(value, default)
 
-            def repl(m: re.Match) -> str:
-                name = m.group(1)
-                if name.isdigit():
-                    try:
-                        return match.group(int(name)) or name
-                    except IndexError:
-                        return name
-                return match.groupdict().get(name) or name
+    # Delegated Platform & Event Utilities
 
-            resolved.append(re.sub(r"\{(.+?)\}", repl, text))
-        return " ".join(resolved)
+    def _group_id(self, event: AstrMessageEvent) -> str:
+        from .src.platform_utils import group_id
 
-    def _strip_random_direction_options(
-        self, key: str, options: dict[str, object]
-    ) -> dict[str, object]:
-        # “转”表情方向随机，方向参数无效，直接忽略以免传给 API 报错。
-        if key != "turn":
-            return options
-        return {
-            name: value
-            for name, value in options.items()
-            if name
-            not in {"__direction", "direction", "left", "right", "top", "bottom"}
-        }
+        return group_id(event)
 
-    def _louvre_options_from_args(
-        self, key: str, tokens: list[str]
-    ) -> tuple[list[str], dict[str, object]]:
-        if key != LOUVRE_KEY:
-            return tokens, {}
-        remaining = []
-        options: dict[str, object] = {}
-        for token in tokens:
-            if "number" not in options:
-                stripped = token.lstrip("#").strip()
-                if stripped in LOUVRE_MODE_MAPPING:
-                    options["number"] = LOUVRE_MODE_MAPPING[stripped]
-                    continue
-                if stripped.isdigit():
-                    n = int(stripped)
-                    if 0 <= n <= 7:
-                        options["number"] = n
-                        continue
-            remaining.append(token)
-        return remaining, options
+    def _sender_id(self, event: AstrMessageEvent) -> str:
+        from .src.platform_utils import sender_id
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("重启memeapi")
-    async def restart_memeapi(self, event: AstrMessageEvent):
-        try:
-            yield event.plain_result("正在重启 memeapi 服务，请稍候...")
-            result = await self.repo_manager.restart_memeapi()
-            yield event.plain_result("\n".join(result["lines"]))
-        finally:
-            self._stop_event(event)
+        return sender_id(event)
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("更新表情包")
-    async def update_memes(self, event: AstrMessageEvent):
-        try:
-            if not self.plugin_config.repo_update_enabled():
-                yield event.plain_result(
-                    "更新表情包功能未启用，请先在配置项 repo_update_enabled 中开启。"
-                )
-                return
+    def _bot_id(self, event: AstrMessageEvent) -> str:
+        from .src.platform_utils import bot_id
 
-            yield event.plain_result("正在更新表情包数据，请稍候...")
+        return bot_id(event)
 
-            os.makedirs(self._meme_data_dir, exist_ok=True)
+    def _avatar_url(self, user_id: str) -> str:
+        from .src.platform_utils import avatar_url
 
-            started_at = datetime.now()
-            repos = self.repo_manager.repos()
-            total = len(repos)
-            semaphore = asyncio.Semaphore(self.plugin_config.repo_update_concurrency())
+        return avatar_url(user_id)
 
-            async def sync_limited(repo: dict, index: int):
-                async with semaphore:
-                    return await self.repo_manager.sync_repo(repo, index, total)
+    def _sender_avatar_url(self, event: AstrMessageEvent) -> str:
+        from .src.platform_utils import sender_avatar_url
 
-            results = await asyncio.gather(
-                *[sync_limited(repo, i + 1) for i, repo in enumerate(repos)],
-                return_exceptions=True,
-            )
-            normalized_results = []
-            for i, result in enumerate(results, 1):
-                if isinstance(result, Exception):
-                    normalized_results.append(
-                        {
-                            "status": "failed",
-                            "updated": False,
-                            "lines": [f"❌ [{i}/{total}] 更新异常", f"    {result}"],
-                        }
-                    )
-                else:
-                    normalized_results.append(result)
-            results = normalized_results
-            success = sum(1 for r in results if r["status"] == "success")
-            success_updates = [
-                r for r in results if r["status"] == "success" and r["updated"]
-            ]
-            failed = sum(1 for r in results if r["status"] == "failed")
-            updated = sum(1 for r in results if r["updated"])
+        return sender_avatar_url(event)
 
-            restart_result = None
-            if updated > 0:
-                restart_result = await self.repo_manager.restart_memeapi()
-                if restart_result["success"]:
-                    restart_result["lines"].append(
-                        "⏳ 等待 meme API 启动后刷新表情信息..."
-                    )
-                    await asyncio.sleep(MEME_API_RESTART_REFRESH_INTERVAL_SECONDS)
-                    await self._refresh_meme_infos_after_restart(
-                        restart_result["lines"]
-                    )
+    def _bot_avatar_url(self, event: AstrMessageEvent) -> str:
+        from .src.platform_utils import bot_avatar_url
 
-            finished_at = datetime.now()
-            summary_lines = [
-                "========================",
-                "📋 更新任务执行完成",
-                f"⏰ {self._format_time(started_at)} → {self._format_time(finished_at)} ({(finished_at - started_at).total_seconds():.2f}秒)",
-                f"📊 成功:{success} 失败:{failed} 更新:{updated}",
-                "========================",
-                "🔌 开始执行 meme 仓库更新任务",
-                f"⏰ 开始时间: {self._format_time(started_at)}",
-                "========================",
-            ]
+        return bot_avatar_url(event)
 
-            for result in results:
-                summary_lines.extend(result["lines"])
+    def _group_name_from_event(self, event: AstrMessageEvent, group_id_val: str) -> str:
+        from .src.platform_utils import group_name_from_event
 
-            if success_updates:
-                summary_lines.extend(["========================", "✅ 成功更新的仓库:"])
-                for result in success_updates:
-                    success_line = next(
-                        (
-                            line.strip()
-                            for line in result["lines"]
-                            if "完成" in line and "📦" not in line
-                        ),
-                        result["lines"][-1],
-                    )
-                    summary_lines.append(f"  - {success_line}")
+        return group_name_from_event(event, group_id_val)
 
-            if restart_result:
-                summary_lines.append("准备重启 memeapi...")
-                summary_lines.extend(restart_result["lines"])
-                summary_lines.append("========================")
-                summary_lines.append(
-                    f"📌 重启状态: {'成功' if restart_result['success'] else '失败'}"
-                )
-            else:
-                summary_lines.extend(
-                    [
-                        "仓库无更新，已跳过 memeapi 重启。",
-                        "========================",
-                    ]
-                )
+    async def _lookup_group_name(
+        self, event: AstrMessageEvent | None, group_id_val: str
+    ) -> str:
+        from .src.platform_utils import lookup_group_name
 
-            yield event.plain_result("\n".join(summary_lines))
-        except Exception as e:
-            logger.exception("更新表情包失败")
-            yield event.plain_result(f"更新表情包失败：{e}")
-        finally:
-            self._stop_event(event)
+        return await lookup_group_name(event, group_id_val)
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("表情包状态")
-    async def meme_status(self, event: AstrMessageEvent):
-        self._stop_event(event)
-        lines = ["表情包仓库状态:"]
+    async def _lookup_sender_name(self, event: AstrMessageEvent, user_id: str) -> str:
+        from .src.platform_utils import lookup_sender_name
 
-        repos = self.repo_manager.repos()
+        return await lookup_sender_name(event, user_id)
 
-        for repo in repos:
-            lines.append(await self.repo_manager.repo_status(repo))
+    def _extract_message_text(self, event: AstrMessageEvent) -> str:
+        from .src.platform_utils import extract_message_text
 
-        try:
-            count = await self._refresh_meme_infos()
-            lines.append(
-                f"meme API: 已加载 {count} 个表情 | {self.plugin_config.meme_api_base_url()}"
-            )
-        except Exception as e:
-            lines.append(
-                f"meme API: 无法连接或加载失败 | {self.plugin_config.meme_api_base_url()} | {e}"
-            )
+        return extract_message_text(self, event)
 
-        yield event.plain_result("\n".join(lines))
+    def _stop_event(self, event: AstrMessageEvent) -> None:
+        from .src.platform_utils import stop_event
 
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("刷新表情信息")
-    async def refresh_meme_infos(self, event: AstrMessageEvent):
-        self._stop_event(event)
-        task = self._meme_info_refresh_task
-        if task and not task.done():
-            yield event.plain_result("meme API 表情信息仍在后台加载中，请稍后再试。")
-            return
-        if task and task.done():
-            try:
-                task.result()
-            except Exception:
-                pass
-        task = asyncio.create_task(self._refresh_meme_infos(force=True))
-        self._meme_info_refresh_task = task
-        try:
-            count = await task
-            yield event.plain_result(f"表情信息刷新完成，共载入 {count} 个表情。")
-        except Exception as e:
-            yield event.plain_result(f"刷新表情信息失败：{e}")
-        finally:
-            if self._meme_info_refresh_task is task:
-                self._meme_info_refresh_task = None
+        stop_event(event)
 
-    async def _set_meme_disabled(
-        self, event: AstrMessageEvent, command_name: str, force_global: bool = False
-    ):
-        self._stop_event(event)
-        name = self._get_message_args(event, command_name)
-        if not name:
-            yield event.plain_result(
-                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
-            )
-            return
-        if force_global:
-            group_id = ""
-        else:
-            group_id, name = self._block_scope_from_args(event, name)
-        if not name:
-            yield event.plain_result(
-                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
-            )
-            return
-        scope_name = (
-            "全局" if force_global else await self._block_scope_name(event, group_id)
-        )
-        await self._refresh_meme_infos()
-        all_meme_infos = self.meme_infos
-        result = self.disabled_memes.disable(group_id, name, all_meme_infos)
-        if result.status == "not_found":
-            yield event.plain_result(
-                f"未找到表情 “{name}”，请确认名称或关键词是否正确。"
-            )
-            return
-        if result.status == "already_disabled":
-            yield event.plain_result(f"“{name}” 已在{scope_name}屏蔽列表中。")
-            return
-        yield event.plain_result(
-            f"已在{scope_name}屏蔽表情 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。"
-        )
+    def _get_message_args(self, event: AstrMessageEvent, command_name: str) -> str:
+        from .src.platform_utils import get_message_args
 
-    async def _unset_meme_disabled(
-        self, event: AstrMessageEvent, command_name: str, force_global: bool = False
-    ):
-        self._stop_event(event)
-        name = self._get_message_args(event, command_name)
-        if not name:
-            yield event.plain_result(
-                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
-            )
-            return
-        if force_global:
-            group_id = ""
-        else:
-            group_id, name = self._block_scope_from_args(event, name)
-        if not name:
-            yield event.plain_result(
-                f"用法：{command_name} {'[群号] ' if not force_global else ''}<表情名/关键词/key>"
-            )
-            return
-        scope_name = (
-            "全局" if force_global else await self._block_scope_name(event, group_id)
-        )
-        await self._refresh_meme_infos()
-        all_meme_infos = self.meme_infos
-        result = self.disabled_memes.enable(group_id, name, all_meme_infos)
-        if result.status == "not_found":
-            yield event.plain_result(
-                f"未找到表情 “{name}”，请确认名称或关键词是否正确。"
-            )
-            return
-        if result.status == "not_disabled":
-            yield event.plain_result(
-                f"表情 “{result.display_name}” 不在{scope_name}屏蔽列表中。"
-            )
-            return
-        yield event.plain_result(
-            f"已在{scope_name}取消屏蔽 “{result.display_name}”，当前{scope_name}共屏蔽 {result.count} 个。"
-        )
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("屏蔽表情")
-    async def disable_meme(self, event: AstrMessageEvent):
-        async for result in self._set_meme_disabled(event, "屏蔽表情"):
-            yield result
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("取消屏蔽表情")
-    async def enable_meme(self, event: AstrMessageEvent):
-        async for result in self._unset_meme_disabled(event, "取消屏蔽表情"):
-            yield result
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("全局屏蔽表情")
-    async def disable_meme_globally(self, event: AstrMessageEvent):
-        async for result in self._set_meme_disabled(
-            event, "全局屏蔽表情", force_global=True
-        ):
-            yield result
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("取消全局屏蔽表情")
-    async def enable_meme_globally(self, event: AstrMessageEvent):
-        async for result in self._unset_meme_disabled(
-            event, "取消全局屏蔽表情", force_global=True
-        ):
-            yield result
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("屏蔽表情列表")
-    async def list_disabled_memes(self, event: AstrMessageEvent):
-        self._stop_event(event)
-        args = self._get_message_args(event, "屏蔽表情列表")
-        group_id = self._block_list_scope_from_args(event, args)
-        async for result in self._list_disabled_memes(event, group_id):
-            yield result
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("全局屏蔽表情列表")
-    async def list_global_disabled_memes(self, event: AstrMessageEvent):
-        self._stop_event(event)
-        async for result in self._list_disabled_memes(event, ""):
-            yield result
-
-    async def _list_disabled_memes(self, event: AstrMessageEvent, group_id: str):
-        title, scope_name = await self._block_scope_title(event, group_id)
-        keys = sorted(
-            self.plugin_config.disabled_meme_names()
-            if not group_id
-            else self.plugin_config.disabled_meme_names_for_group(group_id)
-        )
-        if not keys:
-            yield event.plain_result(f"{scope_name}没有屏蔽任何表情。")
-            return
-        await self._refresh_meme_infos()
-        all_meme_infos = self.meme_infos
-        display_names = self.disabled_memes.disabled_display_names(
-            all_meme_infos, set(keys)
-        )
-        try:
-            image, content_type = await asyncio.to_thread(
-                self.image_renderer.render_disabled_memes, display_names, title
-            )
-            yield event.chain_result([self._image_component(image, content_type)])
-        except Exception as e:
-            logger.warning(f"渲染屏蔽表情列表图片失败: {e}")
-            lines = [f"{title}：共屏蔽 {len(display_names)} 个表情"]
-            lines.extend(f"  {i}. {n}" for i, n in enumerate(display_names, 1))
-            yield event.plain_result("\n".join(lines))
-
-    @filter.command("表情统计")
-    async def meme_usage_stats(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        self._stop_event(event)
-        group_id = self._group_id(event)
-        scope = "group" if group_id else "global"
-        rows = self.usage_stats.rows(scope=scope, group_id=group_id)
-        if not rows:
-            yield event.plain_result(
-                "当前群组暂无表情调用统计。" if group_id else "暂无表情调用统计。"
-            )
-            return
-        try:
-            await self._refresh_meme_infos()
-            title_override = None if group_id else "总表情统计"
-            image, content_type = await asyncio.to_thread(
-                self.image_renderer.render_meme_usage_stats,
-                rows,
-                scope=scope,
-                group_id=group_id,
-                title_override=title_override,
-            )
-            yield event.chain_result([self._image_component(image, content_type)])
-        except Exception as e:
-            logger.warning(f"生成表情调用统计图失败: {e}")
-            yield event.plain_result(
-                self.usage_stats.format_text(rows, scope=scope, group_id=group_id)
-            )
-
-    @filter.command("总表情统计")
-    async def meme_global_usage_stats(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        self._stop_event(event)
-        rows = self.usage_stats.rows(scope="global")
-        if not rows:
-            yield event.plain_result("暂无表情调用统计。")
-            return
-        try:
-            await self._refresh_meme_infos()
-            image, content_type = await asyncio.to_thread(
-                self.image_renderer.render_meme_usage_stats,
-                rows,
-                scope="global",
-                title_override="总表情统计",
-            )
-            yield event.chain_result([self._image_component(image, content_type)])
-        except Exception as e:
-            logger.warning(f"生成总表情调用统计图失败: {e}")
-            yield event.plain_result(self.usage_stats.format_text(rows))
-
-    @filter.command("meme搜索")
-    async def meme_search(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        self._stop_event(event)
-        query = self._get_message_args(event, "meme搜索")
-        if not query:
-            yield event.plain_result("用法：meme搜索 <关键词>")
-            return
-        try:
-            await self._refresh_meme_infos()
-            visible_infos = self._visible_meme_infos(event)
-            matches = self._search_memes(query, visible_infos)
-            if not matches:
-                yield event.plain_result(f"未找到相关表情：{query}")
-                return
-            title = f"搜索结果（查看 {len(matches)} 条搜索结果）"
-            result_text = "\n".join(
-                [
-                    title,
-                    *[
-                        self._format_meme_search_result(index, info)
-                        for index, info in enumerate(matches, 1)
-                    ],
-                ]
-            )
-            if (
-                self.plugin_config.meme_search_forward_enabled()
-                and await self._try_send_forward_message(
-                    event, title, result_text, len(matches)
-                )
-            ):
-                return
-            yield event.plain_result(result_text)
-        except Exception as e:
-            yield event.plain_result(f"搜索表情失败：{e}")
-
-    @filter.command("表情列表")
-    async def meme_list(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        try:
-            await self._refresh_meme_infos()
-            visible_infos = self._visible_meme_infos(event)
-            try:
-                image, content_type = await self._render_list(visible_infos)
-                yield event.chain_result([self._image_component(image, content_type)])
-                return
-            except Exception as e:
-                logger.warning(f"meme API 渲染表情列表失败，降级为文本列表: {e}")
-            result_text = self._format_meme_list_text(visible_infos)
-            if (
-                self.plugin_config.meme_search_forward_enabled()
-                and await self._try_send_forward_message(
-                    event, "表情列表", result_text, len(visible_infos)
-                )
-            ):
-                return
-            yield event.plain_result(result_text)
-        except Exception as e:
-            yield event.plain_result(f"获取表情列表失败：{e}")
-        finally:
-            self._stop_event(event)
-
-    @filter.command("表情详情")
-    async def meme_info(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        self._stop_event(event)
-        query = self._get_message_args(event, "表情详情")
-        if not query:
-            yield event.plain_result("用法：表情详情 <表情名/关键词>")
-            return
-        try:
-            await self._refresh_meme_infos()
-            info = self._find_meme(query, self._visible_meme_infos(event))
-            if not info:
-                yield event.plain_result(f"未找到表情：{query}")
-                return
-            params = self._params_type(info)
-            lines = [
-                f"表情：{info.get('key')}",
-                f"关键词：{_format_keywords([str(v) for v in info.get('keywords', [])])}",
-            ]
-            shortcuts = [
-                str(v.get("humanized") or v.get("key"))
-                for v in info.get("shortcuts", [])
-                if isinstance(v, dict)
-            ]
-            if shortcuts:
-                lines.append(f"快捷指令：{_format_keywords(shortcuts)}")
-            if params["max_images"]:
-                lines.append(
-                    f"图片数量：{_format_range(params['min_images'], params['max_images'])}"
-                )
-            if params["max_texts"]:
-                lines.append(
-                    f"文字数量：{_format_range(params['min_texts'], params['max_texts'])}"
-                )
-                if params["default_texts"]:
-                    lines.append(
-                        f"默认文字：{_format_keywords([str(v) for v in params['default_texts']])}"
-                    )
-            components = [Comp.Plain("\n".join(lines))]
-            try:
-                image, content_type = await self.meme_client.get_preview(
-                    str(info.get("key"))
-                )
-                components.extend(
-                    [Comp.Plain("\n"), self._image_component(image, content_type)]
-                )
-            except Exception as e:
-                logger.warning(f"获取表情预览失败 {info.get('key')}: {e}")
-            yield event.chain_result(components)
-        except Exception as e:
-            yield event.plain_result(f"获取表情详情失败：{e}")
-
-    @filter.command("制作表情")
-    async def meme_generate(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        self._stop_event(event)
-        raw_args = self._get_message_args(event, "制作表情")
-        if not raw_args:
-            yield event.plain_result(
-                "用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]"
-            )
-            return
-        try:
-            parts = split_arg_string(raw_args)
-            if not parts:
-                yield event.plain_result(
-                    "用法：制作表情 <表情名/关键词> [文字/@自己/@QQ号/图片URL...]"
-                )
-                return
-            query, rest = parts[0], parts[1:]
-            await self._refresh_meme_infos()
-            info = self._find_meme(query, self._visible_meme_infos(event))
-            if not info:
-                yield event.plain_result(f"未找到表情：{query}")
-                return
-            params = self._params_type(info)
-            key = str(info.get("key"))
-            rest, options = self._normalize_meme_options(rest)
-            options = self._strip_random_direction_options(key, options)
-            options = self._materialize_direction_options(options)
-            rest, louvre_options = self._louvre_options_from_args(key, rest)
-            options.update(louvre_options)
-            images, texts, user_infos = await self._resolve_generate_args(event, rest)
-            if (
-                self.plugin_config.meme_auto_sender_avatar()
-                and len(images) < params["min_images"]
-            ):
-                if images:
-                    await self._fill_sender_avatar_images(
-                        event, images, user_infos, params["min_images"]
-                    )
-                else:
-                    await self._fill_default_avatar_images(
-                        event, images, user_infos, params["min_images"]
-                    )
-            if self.plugin_config.meme_auto_default_texts() and not texts:
-                texts.extend(str(v) for v in params["default_texts"])
-            if not (params["min_images"] <= len(images) <= params["max_images"]):
-                yield event.plain_result(
-                    f"图片数量不符，需要 {_format_range(params['min_images'], params['max_images'])} 张，当前 {len(images)} 张。"
-                )
-                return
-            if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
-                yield event.plain_result(
-                    f"文字数量不符，需要 {_format_range(params['min_texts'], params['max_texts'])} 段，当前 {len(texts)} 段。"
-                )
-                return
-            image, content_type = await self.meme_client.render_meme(
-                key, images, texts, user_infos, options
-            )
-            await self.usage_stats.record(event, info)
-            async for result in self._yield_and_stop(
-                event, event.chain_result([self._image_component(image, content_type)])
-            ):
-                yield result
-        except ArgSyntaxError as e:
-            yield event.plain_result(str(e))
-        except Exception as e:
-            yield event.plain_result(f"制作表情失败：{e}")
-
-    async def _random_meme_results(
-        self, event: AstrMessageEvent, raw_args: str, resolve_args: bool = True
-    ):
-        try:
-            await self._refresh_meme_infos()
-            tokens, options = self._normalize_meme_options(
-                split_arg_string(raw_args)
-            )
-            options = self._materialize_direction_options(options)
-            if resolve_args:
-                images, texts, user_infos = await self._resolve_generate_args(
-                    event, tokens
-                )
-            else:
-                images, texts, user_infos = [], [], []
-            auto_use = not images and not texts
-            suitable = []
-            for info in self._visible_meme_infos(event).values():
-                params = self._params_type(info)
-                image_count = params["min_images"] if auto_use else len(images)
-                if params["min_images"] <= image_count <= params["max_images"] and (
-                    auto_use or params["min_texts"] <= len(texts) <= params["max_texts"]
-                ):
-                    suitable.append((info, params))
-            random.shuffle(suitable)
-            for info, params in suitable:
-                try:
-                    render_images = list(images)
-                    render_user_infos = list(user_infos)
-                    if auto_use:
-                        await self._fill_default_avatar_images(
-                            event,
-                            render_images,
-                            render_user_infos,
-                            params["min_images"],
-                        )
-                    render_texts = (
-                        [str(v) for v in params["default_texts"]] if auto_use else texts
-                    )
-                    image, content_type = await self.meme_client.render_meme(
-                        str(info.get("key")),
-                        render_images,
-                        render_texts,
-                        render_user_infos,
-                        self._strip_random_direction_options(
-                            str(info.get("key")), options
-                        ),
-                    )
-                    await self.usage_stats.record(event, info)
-                    keywords = _format_keywords(
-                        [str(v) for v in info.get("keywords", [])]
-                    )
-                    async for result in self._yield_and_stop(
-                        event,
-                        event.chain_result(
-                            [
-                                Comp.Plain(f"关键词：{keywords}\n"),
-                                self._image_component(image, content_type),
-                            ]
-                        ),
-                    ):
-                        yield result
-                    return
-                except Exception as e:
-                    logger.debug(f"随机表情渲染跳过 {info.get('key')}: {e}")
-                    continue
-            yield event.plain_result("没有找到适合当前参数的表情。")
-        except Exception as e:
-            yield event.plain_result(f"随机表情失败：{e}")
-
-    @filter.custom_filter(PokeToBotFilter)
-    async def meme_poke_random_listener(self, event: AstrMessageEvent):
-        if (
-            not self.plugin_config.meme_poke_random_enabled()
-            or not self._is_allowed_group(event)
-        ):
-            return
-        async for result in self._random_meme_results(event, "", resolve_args=False):
-            yield result
-
-    @filter.event_message_type(EventMessageType.ALL)
-    async def meme_shortcut_listener(self, event: AstrMessageEvent):
-        if not self._is_allowed_group(event):
-            return
-        content = self._extract_message_text(event)
-        if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
-            async for result in self._random_meme_results(event, ""):
-                yield result
-            self._stop_event(event)
-            return
-
-        if not self.plugin_config.meme_shortcut_enabled():
-            return
-
-        if not content or content.startswith(("/", "#", "%", "％")):
-            return
-        if not self.meme_infos:
-            # 表情信息尚未就绪：后台异步刷新，本条消息直接放行。
-            # 不能在此 await 等待初始化完成，否则会阻塞整个事件总线，导致所有消息
-            # 收发卡住；也不能 stop_event，否则会把 help 等本不该由本插件处理的消息拦截。
-            self._ensure_meme_info_refresh_task()
-            return
-        if not self.meme_shortcuts:
-            self._refresh_meme_shortcuts()
-        visible_infos = self._visible_meme_infos(event)
-        candidates = self._shortcut_index.get(content[0], [])
-        if self._shortcut_wildcards:
-            candidates = sorted(
-                [*candidates, *self._shortcut_wildcards],
-                key=lambda item: len(item["regex"]),
-                reverse=True,
-            )
-        try:
-            for shortcut in candidates:
-                match = shortcut["compiled_regex"].match(content)
-                if not match:
-                    continue
-                tail = content[match.end() :].strip()
-                resolved_args = " ".join(
-                    value
-                    for value in [self._shortcut_args(shortcut["args"], match), tail]
-                    if value
-                ).strip()
-                info = visible_infos.get(shortcut["key"])
-                if not info:
-                    continue
-                params = self._params_type(info)
-                key = str(info.get("key"))
-                resolved_tokens, options = self._normalize_meme_options(
-                    split_arg_string(resolved_args)
-                )
-                options = {**shortcut.get("options", {}), **options}
-                content_options = self._direction_options_from_text(key, content)
-                if content_options:
-                    for d in [
-                        "left",
-                        "right",
-                        "top",
-                        "bottom",
-                        "direction",
-                        "__direction",
-                    ]:
-                        options.pop(d, None)
-                    options.update(content_options)
-                options = self._strip_random_direction_options(key, options)
-                options = self._materialize_direction_options(options)
-                resolved_tokens, louvre_options = self._louvre_options_from_args(
-                    key, resolved_tokens
-                )
-                options.update(louvre_options)
-                images, texts, user_infos = await self._resolve_generate_args(
-                    event, resolved_tokens
-                )
-
-                if (
-                    params["max_images"] == 2
-                    and str(info.get("key")) != MIRAGETANK_KEY
-                    and len(images) >= 3
-                ):
-                    images = [images[0], images[-1]]
-                    user_infos = [user_infos[0], user_infos[-1]]
-                elif len(images) > params["max_images"]:
-                    images, user_infos = self._select_render_images(
-                        images, user_infos, params["max_images"]
-                    )
-
-                if (
-                    self.plugin_config.meme_auto_sender_avatar()
-                    and len(images) < params["min_images"]
-                ):
-                    if images:
-                        await self._fill_sender_avatar_images(
-                            event, images, user_infos, params["min_images"]
-                        )
-                    else:
-                        await self._fill_default_avatar_images(
-                            event, images, user_infos, params["min_images"]
-                        )
-
-                if self.plugin_config.meme_auto_default_texts() and not texts:
-                    texts.extend(str(v) for v in params["default_texts"])
-
-                if not (params["min_images"] <= len(images) <= params["max_images"]):
-                    continue
-                if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
-                    continue
-
-                try:
-                    image, content_type = await self.meme_client.render_meme(
-                        key, images, texts, user_infos, options
-                    )
-                except Exception as e:
-                    logger.debug(f"快捷指令渲染跳过 {key}: {e}")
-                    continue
-                await self.usage_stats.record(event, info)
-                yield event.chain_result([self._image_component(image, content_type)])
-                self._stop_event(event)
-                return
-        except Exception as e:
-            logger.warning(f"处理表情快捷指令异常: {e}")
-            return
+        return get_message_args(self, event, command_name)

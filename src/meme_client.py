@@ -277,7 +277,10 @@ class MemeApiClient:
         )
 
     async def render_list(
-        self, meme_list: list[dict], text_template: str, timeout_total: int | None = None
+        self,
+        meme_list: list[dict],
+        text_template: str,
+        timeout_total: int | None = None,
     ) -> tuple[bytes, str]:
         return await self._post_image(
             [
