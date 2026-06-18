@@ -164,12 +164,24 @@ class MemeUpdater(Star):
             except asyncio.CancelledError:
                 pass
             self._temp_cleanup_task = None
+        if self._meme_info_refresh_task:
+            self._meme_info_refresh_task.cancel()
+            try:
+                await self._meme_info_refresh_task
+            except asyncio.CancelledError:
+                pass
+            self._meme_info_refresh_task = None
         if self._download_session and not self._download_session.closed:
             try:
                 await self._download_session.close()
             except Exception as e:
                 logger.debug(f"关闭图片下载 session 失败：{e}")
         self._download_session = None
+        if self.meme_client:
+            try:
+                await self.meme_client.close()
+            except Exception as e:
+                logger.debug(f"关闭 meme_client session 失败：{e}")
         parent_terminate = getattr(super(), "terminate", None)
         if parent_terminate:
             result = parent_terminate()
