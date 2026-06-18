@@ -19,7 +19,11 @@ def avatar_url(user_id: str) -> str:
     """
     if not user_id:
         return ""
-    return QQ_AVATAR_URL_TEMPLATE.format(user_id=quote(str(user_id), safe=""))
+    user_id_str = str(user_id).strip()
+    if not user_id_str.isdigit():
+        # Non-QQ platform user IDs are not numeric. Fallback to default QQ system avatar to prevent HTTP 404/533 errors.
+        return "https://q.qlogo.cn/g?b=qq&nk=10000&s=640"
+    return QQ_AVATAR_URL_TEMPLATE.format(user_id=quote(user_id_str, safe=""))
 
 
 def sender_id(event: AstrMessageEvent) -> str:

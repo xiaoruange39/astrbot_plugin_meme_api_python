@@ -228,6 +228,23 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             return "image/webp"
         return "image/png"
 
+    def ensure_valid_image_bytes(
+        data_bytes: bytes, default_mime: str
+    ) -> tuple[bytes, str]:
+        if data_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return data_bytes, "image/png"
+        if data_bytes.startswith(b"\xff\xd8\xff"):
+            return data_bytes, "image/jpeg"
+        if data_bytes.startswith(b"GIF87a") or data_bytes.startswith(b"GIF89a"):
+            return data_bytes, "image/gif"
+        if data_bytes.startswith(b"RIFF") and data_bytes[8:12] == b"WEBP":
+            return data_bytes, "image/webp"
+        logger.warning("下载的文件/图片数据不是有效的图片格式，已使用默认空白图片替代")
+        fallback_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        )
+        return fallback_png, "image/png"
+
     # Try utilizing MediaResolver if available
     try:
         from astrbot.core.utils.media_utils import MediaResolver
@@ -240,6 +257,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             async with resolver.as_path() as resolved:
                 data = resolved.read_bytes()
                 content_type = resolved.mime_type or detect_mime(data)
+                data, content_type = ensure_valid_image_bytes(data, content_type)
                 ext = mimetypes.guess_extension(content_type) or ".png"
                 return data, content_type, f"image{ext}"
         except Exception as e:
@@ -255,6 +273,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
                 b64_data += "=" * (4 - missing_padding)
             data = base64.b64decode(b64_data)
             content_type = detect_mime(data)
+            data, content_type = ensure_valid_image_bytes(data, content_type)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
         except Exception as e:
@@ -269,6 +288,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             if missing_padding:
                 b64_data += "=" * (4 - missing_padding)
             data = base64.b64decode(b64_data)
+            data, content_type = ensure_valid_image_bytes(data, content_type)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
         except Exception as e:
@@ -289,6 +309,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             with open(local_path, "rb") as f:
                 data = f.read()
             content_type = detect_mime(data)
+            data, content_type = ensure_valid_image_bytes(data, content_type)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
         except Exception as e:
@@ -305,6 +326,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             with open(url_clean, "rb") as f:
                 data = f.read()
             content_type = detect_mime(data)
+            data, content_type = ensure_valid_image_bytes(data, content_type)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
         except Exception as e:
@@ -316,6 +338,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
         if len(compact) > 64:
             data = base64.b64decode(compact)
             content_type = detect_mime(data)
+            data, content_type = ensure_valid_image_bytes(data, content_type)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
     except Exception:
@@ -327,6 +350,7 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
     data, content_type = await request_external_image(
         updater, session, url_clean, timeout
     )
+    data, content_type = ensure_valid_image_bytes(data, content_type)
     ext = mimetypes.guess_extension(content_type) or ".png"
     return data, content_type, f"image{ext}"
 
