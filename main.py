@@ -193,7 +193,7 @@ class MemeUpdater(Star):
             if not force and self._meme_infos:
                 return len(self._meme_infos)
             try:
-                infos = await self.meme_client.get_meme_infos()
+                infos = await self.meme_client.fetch_meme_infos()
                 self.meme_infos = infos
                 self._refresh_meme_shortcuts()
                 return len(infos)
