@@ -153,7 +153,9 @@ class MemeUpdater(Star):
     async def initialize(self):
         """Asynchronously initializes the plugin resources on load."""
         self._ensure_meme_info_refresh_task()
-        self._temp_cleanup_task = asyncio.create_task(self._temp_cleanup_loop())
+        if self._temp_cleanup_task is None or self._temp_cleanup_task.done():
+            self._temp_cleanup_task = asyncio.create_task(self._temp_cleanup_loop())
+            self._temp_cleanup_task.add_done_callback(self._log_background_task_result)
 
     async def terminate(self):
         """Asynchronously cleans up the plugin resources on unload."""
@@ -268,16 +270,18 @@ class MemeUpdater(Star):
         os.makedirs(temp_dir, exist_ok=True)
         while True:
             try:
-                await asyncio.sleep(TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS)
                 now = time.time()
                 from .src.commands import _cleanup_temp_images
 
                 _cleanup_temp_images(temp_dir, now)
                 self._last_temp_cleanup = now
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 logger.error(f"清理临时图片后台任务异常: {e}")
+
+            try:
+                await asyncio.sleep(TEMP_IMAGE_CLEANUP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
 
     def _ensure_download_session(self) -> aiohttp.ClientSession:
         if self._download_session is None or self._download_session.closed:
@@ -457,7 +461,7 @@ class MemeUpdater(Star):
         return True
 
     def _format_time(self, dt: datetime) -> str:
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return f"{dt.year}/{dt.month}/{dt.day} {dt:%H:%M:%S}"
 
     def _regex_first_literal(self, regex: str) -> str | None:
         if not regex:
