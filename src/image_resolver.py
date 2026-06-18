@@ -441,7 +441,21 @@ def extract_image_urls_from_segments(updater, segments: list[object]) -> list[st
                 is_valid = True
             else:
                 try:
-                    if os.path.isabs(value) or os.path.exists(value):
+                    ext = os.path.splitext(value)[1].lower()
+                    if ext in {
+                        ".png",
+                        ".jpg",
+                        ".jpeg",
+                        ".gif",
+                        ".webp",
+                        ".bmp",
+                        ".tif",
+                        ".tiff",
+                        ".svg",
+                        ".heic",
+                    }:
+                        is_valid = True
+                    elif os.path.isabs(value) or os.path.exists(value):
                         is_valid = True
                     else:
                         # check if it is bare base64 with valid image headers
