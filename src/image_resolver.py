@@ -3,6 +3,7 @@ import base64
 import ipaddress
 import mimetypes
 import os
+import re
 import socket
 import urllib.parse
 from urllib.parse import urlparse
@@ -217,6 +218,16 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
         RuntimeError: If downloading or resolving the image fails.
     """
 
+    def has_image_signature(data_bytes: bytes) -> bool:
+        return (
+            data_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+            or data_bytes.startswith(b"\xff\xd8\xff")
+            or data_bytes.startswith(b"GIF87a")
+            or data_bytes.startswith(b"GIF89a")
+            or (data_bytes.startswith(b"RIFF") and data_bytes[8:12] == b"WEBP")
+            or data_bytes.startswith(b"BM")
+        )
+
     def detect_mime(data_bytes: bytes) -> str:
         if data_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
             return "image/png"
@@ -226,6 +237,8 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             return "image/gif"
         if data_bytes.startswith(b"RIFF") and data_bytes[8:12] == b"WEBP":
             return "image/webp"
+        if data_bytes.startswith(b"BM"):
+            return "image/bmp"
         return "image/png"
 
     # Try utilizing MediaResolver if available
@@ -234,12 +247,16 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
     except ImportError:
         MediaResolver = None
 
+    # 仅在 MediaResolver 可用且能返回有效图片时使用它；旧版本框架（如 2.25）
+    # 没有该工具或其行为不同时，统一回退到下方的内置解析逻辑，保持兼容。
     if MediaResolver is not None:
         try:
             resolver = MediaResolver(url, media_type="image")
             async with resolver.as_path() as resolved:
                 data = resolved.read_bytes()
-                content_type = resolved.mime_type or detect_mime(data)
+                if not data or not has_image_signature(data):
+                    raise RuntimeError("MediaResolver 返回的数据不是有效图片")
+                content_type = getattr(resolved, "mime_type", None) or detect_mime(data)
                 ext = mimetypes.guess_extension(content_type) or ".png"
                 return data, content_type, f"image{ext}"
         except Exception as e:
@@ -254,6 +271,8 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             if missing_padding:
                 b64_data += "=" * (4 - missing_padding)
             data = base64.b64decode(b64_data)
+            if not data or not has_image_signature(data):
+                raise RuntimeError("base64 内容不是有效图片")
             content_type = detect_mime(data)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
@@ -269,6 +288,8 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
             if missing_padding:
                 b64_data += "=" * (4 - missing_padding)
             data = base64.b64decode(b64_data)
+            if not data or not has_image_signature(data):
+                raise RuntimeError("data URI 内容不是有效图片")
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
         except Exception as e:
@@ -288,6 +309,8 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
                 local_path = urllib.parse.unquote(local_path)
             with open(local_path, "rb") as f:
                 data = f.read()
+            if not data or not has_image_signature(data):
+                raise RuntimeError("本地文件内容不是有效图片")
             content_type = detect_mime(data)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
@@ -304,20 +327,25 @@ async def download_image(updater, url: str) -> tuple[bytes, str, str]:
         try:
             with open(url_clean, "rb") as f:
                 data = f.read()
+            if not data or not has_image_signature(data):
+                raise RuntimeError("本地文件内容不是有效图片")
             content_type = detect_mime(data)
             ext = mimetypes.guess_extension(content_type) or ".png"
             return data, content_type, f"image{ext}"
         except Exception as e:
             raise RuntimeError(f"读取本地文件图片失败: {e}")
 
-    # Check if bare base64
+    # Check if bare base64 —— 仅当能解码出带有效图片头的数据时才采用，
+    # 否则（例如 QQ 引用图片的 file 字段是一长串文件名/ID）继续走 HTTP 下载，
+    # 避免把非图片字符串误当 base64 解出乱码字节送给 meme API。
     try:
         compact = "".join(url_clean.split())
-        if len(compact) > 64:
+        if len(compact) > 64 and re.fullmatch(r"[A-Za-z0-9+/=]+", compact):
             data = base64.b64decode(compact)
-            content_type = detect_mime(data)
-            ext = mimetypes.guess_extension(content_type) or ".png"
-            return data, content_type, f"image{ext}"
+            if data and has_image_signature(data):
+                content_type = detect_mime(data)
+                ext = mimetypes.guess_extension(content_type) or ".png"
+                return data, content_type, f"image{ext}"
     except Exception:
         pass
 
@@ -446,7 +474,9 @@ def extract_image_urls_from_segments(updater, segments: list[object]) -> list[st
                     else:
                         # check if it is bare base64 with valid image headers
                         compact = "".join(value.split())
-                        if len(compact) > 64:
+                        if len(compact) > 64 and re.fullmatch(
+                            r"[A-Za-z0-9+/=]+", compact
+                        ):
                             decoded = base64.b64decode(compact)
                             if (
                                 decoded.startswith(b"\x89PNG\r\n\x1a\n")
