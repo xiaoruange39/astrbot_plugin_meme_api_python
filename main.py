@@ -436,13 +436,13 @@ class MemeUpdater(Star):
     # Metadata & Config Helpers
 
     def _is_allowed_group(self, event: AstrMessageEvent) -> bool:
+        whitelist = self.plugin_config.meme_group_whitelist()
+        if not whitelist:
+            return True
         group_id = self._group_id(event)
-        if not group_id:
-            return True
-        allowed_groups = self.plugin_config.meme_allowed_groups()
-        if not allowed_groups:
-            return True
-        return group_id in allowed_groups
+        if group_id and group_id not in whitelist:
+            return False
+        return True
 
     def _format_time(self, dt: datetime) -> str:
         return dt.strftime("%Y-%m-%d %H:%M:%S")
