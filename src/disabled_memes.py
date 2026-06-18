@@ -3,7 +3,6 @@ from dataclasses import dataclass
 
 from astrbot.api import logger
 
-
 _EMOJI_PATTERN = re.compile(
     "["
     "\U0001f1e6-\U0001f1ff"
