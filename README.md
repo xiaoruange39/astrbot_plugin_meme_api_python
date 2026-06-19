@@ -15,7 +15,9 @@
 4. 如果使用远程更新模式，AstrBot 运行环境需要能通过 `ssh` 登录远程服务器。
 5. QQ 头像和 QQ 图片下载依赖外网访问，网络不通时会影响自动补头像或引用图片生成。
 
-## Docker 一键部署 memeapi
+## 萌新/小白一键部署（可以根据需要调整参数，以下仅供参考）
+
+### 1、Docker 一键部署 memeapi
 
 请根据实际情况更改映射目录，下面使用的是插件配置项的默认目录：
 
@@ -42,6 +44,18 @@ docker run -d \
 ```
 
 详细参数说明 [meme-generator Docker 部署 Wiki](https://github.com/MemeCrafters/meme-generator/wiki/Docker-%E9%83%A8%E7%BD%B2)。
+
+### 2、在root目录新建一个名为`memeapi`的文件夹
+
+根据实际情况更改目录，下面使用的是插件配置项的默认目录: 
+
+```
+mkdir /root/memeapi
+```
+
+### 3、向bot发送`更新表情包`指令
+
+等待更新完成即可
 
 ## 配置说明
 
