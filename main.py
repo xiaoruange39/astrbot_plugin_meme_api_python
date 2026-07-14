@@ -63,7 +63,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.2.7",
+    "0.2.8",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""
@@ -434,6 +434,58 @@ class MemeUpdater(Star):
 
         async for res in meme_generate(self, event):
             yield res
+
+    @filter.llm_tool(name="meme_get_random_candidates")
+    async def llm_meme_get_random_candidates(
+        self, event: AstrMessageEvent, scene: str
+    ):
+        """Get 50 random available meme templates when a meme may suit the conversation.
+
+        Choose a template using the full conversation, its keywords, tags, and input
+        constraints. Do not overuse memes. Request another batch if none fits.
+
+        Args:
+            scene(string): A short summary of the current scene, mood, and reply intent
+        """
+        from .src.llm_tools import get_random_candidate_batch
+
+        try:
+            result = await get_random_candidate_batch(self, event, scene)
+            yield event.plain_result(result)
+        except Exception as e:
+            yield event.plain_result(f"Failed to get meme candidates: {e}")
+
+    @filter.llm_tool(name="meme_generate_from_candidate")
+    async def llm_meme_generate_from_candidate(
+        self,
+        event: AstrMessageEvent,
+        meme_name: str,
+        texts: list[str] | None = None,
+        image_urls: list[str] | None = None,
+        user_ids: list[str] | None = None,
+        use_sender_avatar: bool = True,
+    ):
+        """Generate a meme selected from meme_get_random_candidates.
+
+        Images in the current or replied-to message are used automatically. Do not
+        repeat the generated meme with an equivalent text response after success.
+
+        Args:
+            meme_name(string): The key of a template from the candidate batch
+            texts(array[string]): Text items required by the template, or an empty array
+            image_urls(array[string]): Additional image URLs, or an empty array
+            user_ids(array[string]): Numeric user IDs for avatar inputs
+            use_sender_avatar(boolean): Allow sender/bot avatars when images are missing
+        """
+        from .src.llm_tools import generate_meme_from_candidate
+
+        try:
+            result = await generate_meme_from_candidate(
+                self, event, meme_name, texts, image_urls, user_ids, use_sender_avatar
+            )
+            yield result
+        except Exception as e:
+            yield event.plain_result(f"AI meme generation failed: {e}")
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):

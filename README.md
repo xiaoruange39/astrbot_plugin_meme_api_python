@@ -79,6 +79,7 @@ mkdir /root/memeapi
 | `meme_usage_stats_title` | `表情统计` 图片顶部标题。 |
 | `meme_shortcut_enabled` | 是否启用表情快捷指令匹配。 |
 | `meme_poke_random_enabled` | 是否启用戳一戳机器人时发送随机表情。 |
+| `meme_llm_tool_enabled` | Enable the opt-in LLM tools that choose from 50 random visible templates and generate a context-appropriate meme. |
 | `meme_auto_default_texts` | 未提供文字时是否使用 meme API 返回的默认文字。 |
 | `meme_auto_sender_avatar` | 图片数量不足时是否自动补当前发送者头像。 |
 | `meme_list_text_template` | 表情列表渲染模板，默认 `{index}. {keywords}`。 |
@@ -106,6 +107,15 @@ mkdir /root/memeapi
 - `随机表情 [文字/@自己/@QQ号/图片URL...]`：随机选择一个符合参数数量的表情。
 
 开启 `meme_poke_random_enabled` 后，用户戳一戳机器人也会发送一张随机表情。
+
+### LLM autonomous meme tools
+
+Enable `meme_llm_tool_enabled` and reload the plugin. The plugin exposes two tools:
+
+- `meme_get_random_candidates`: returns up to 50 random templates that are visible in the current group.
+- `meme_generate_from_candidate`: renders the template selected by the AI.
+
+The candidate payload includes keywords, tags, image/text limits, and default text. Disabled templates and group restrictions are respected. If a batch has no suitable template, the AI may request another random batch.
 
 开启快捷指令后，可以直接发送 meme API 返回的关键词或快捷句式，例如：
 

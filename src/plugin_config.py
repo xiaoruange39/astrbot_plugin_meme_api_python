@@ -279,6 +279,9 @@ class MemePluginConfig:
     def meme_poke_random_enabled(self) -> bool:
         return bool(self.config.get("meme_poke_random_enabled", False))
 
+    def meme_llm_tool_enabled(self) -> bool:
+        return bool(self.config.get("meme_llm_tool_enabled", False))
+
     def meme_group_whitelist(self) -> list[str]:
         return [
             str(v).strip() for v in self.config.get("meme_group_whitelist", []) if v

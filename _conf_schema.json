@@ -111,6 +111,12 @@
     "type": "bool",
     "default": false
   },
+  "meme_llm_tool_enabled": {
+    "description": "Enable autonomous LLM meme tools",
+    "hint": "Disabled by default. The AI receives 50 random visible templates per batch and chooses one using the conversation context.",
+    "type": "bool",
+    "default": false
+  },
   "meme_auto_default_texts": {
     "description": "自动使用默认文字",
     "hint": "制作表情时未提供文字则自动使用 meme API 返回的默认文字。",
