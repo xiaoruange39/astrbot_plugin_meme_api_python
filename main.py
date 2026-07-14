@@ -442,8 +442,8 @@ class MemeUpdater(Star):
         """Get 50 random available meme templates when a meme may suit the conversation.
 
         Choose a template using the full conversation, its keywords, tags, and input
-        constraints. If none fits, do not call either meme tool again in this turn;
-        answer normally without a meme.
+        constraints. If none fits, end the turn silently without calling another
+        tool or producing a follow-up answer.
 
         Args:
             scene(string): A short summary of the current scene, mood, and reply intent
@@ -452,9 +452,13 @@ class MemeUpdater(Star):
 
         try:
             result = await get_random_candidate_batch(self, event, scene)
+            if result is None:
+                event.stop_event()
             return result
         except Exception as e:
-            return f"Failed to get meme candidates: {e}"
+            logger.warning(f"Failed to get meme candidates: {e}", exc_info=True)
+            event.stop_event()
+            return None
 
     @filter.llm_tool(name="meme_generate_from_candidate")
     async def llm_meme_generate_from_candidate(
@@ -468,8 +472,9 @@ class MemeUpdater(Star):
     ):
         """Generate a meme selected from meme_get_random_candidates.
 
-        Images in the current or replied-to message are used automatically. Do not
-        repeat the generated meme with an equivalent text response after success.
+        Images in the current or replied-to message are used automatically. On
+        success, send exactly one meme. On failure, end silently without retrying
+        the tool or producing a follow-up answer.
 
         Args:
             meme_name(string): The key of a template from the candidate batch
@@ -478,28 +483,22 @@ class MemeUpdater(Star):
             user_ids(array[string]): Numeric user IDs for avatar inputs
             use_sender_avatar(boolean): Allow sender/bot avatars when images are missing
         """
-        from .src.llm_tools import (
-            GENERATION_ATTEMPT_FLAG,
-            generate_meme_from_candidate,
-        )
-
-        attempts = int(getattr(event, GENERATION_ATTEMPT_FLAG, 0) or 0)
-        if attempts >= 2:
-            return None
-        current_attempt = attempts + 1
-        setattr(event, GENERATION_ATTEMPT_FLAG, current_attempt)
+        from .src.llm_tools import generate_meme_from_candidate
 
         try:
             result = await generate_meme_from_candidate(
                 self, event, meme_name, texts, image_urls, user_ids, use_sender_avatar
             )
-            if isinstance(result, str) and current_attempt >= 2:
-                return None
+            if result is None:
+                event.stop_event()
             return result
         except Exception as e:
-            if current_attempt >= 2:
-                return None
-            return f"AI meme generation failed: {e}"
+            logger.warning(
+                f"AI meme generation failed: {e}",
+                exc_info=True,
+            )
+            event.stop_event()
+            return None
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):

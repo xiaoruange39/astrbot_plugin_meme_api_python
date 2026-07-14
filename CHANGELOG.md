@@ -9,7 +9,7 @@
 
 - Candidate data is now returned only to the Agent instead of being sent to chat.
 - A second candidate request in the same turn is rejected; no match means no meme.
-- Repeated candidate calls and repeated generation failures now terminate the Agent loop.
+- Candidate lookup or meme generation failures now stop silently without another LLM reply.
 - A successfully sent LLM meme now stops the source event to prevent duplicate LLM runs and images.
 - AI generation now trims excess images and keeps validation errors internal.
 
