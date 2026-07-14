@@ -115,7 +115,7 @@ Enable `meme_llm_tool_enabled` and reload the plugin. The plugin exposes two too
 - `meme_get_random_candidates`: returns up to 50 random templates that are visible in the current group.
 - `meme_generate_from_candidate`: renders the template selected by the AI.
 
-The candidate payload includes keywords, tags, image/text limits, and default text. Disabled templates and group restrictions are respected. If a batch has no suitable template, the AI may request another random batch.
+The candidate payload includes keywords, tags, image/text limits, and default text. Disabled templates and group restrictions are respected. If no candidate fits, the AI should stop using meme tools for that turn and answer normally.
 
 开启快捷指令后，可以直接发送 meme API 返回的关键词或快捷句式，例如：
 

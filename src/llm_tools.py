@@ -11,6 +11,7 @@ from .commands import (
 )
 
 CANDIDATE_COUNT = 50
+CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
 
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
@@ -56,7 +57,8 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
             "candidate_count": len(candidates),
             "instruction": (
                 "Choose the candidate that best fits the full conversation, then call "
-                "meme_generate_from_candidate. Request another batch if none fits."
+                "meme_generate_from_candidate. If none fits, do not call either meme "
+                "tool again in this turn; answer normally without a meme."
             ),
             "candidates": candidates,
         },
@@ -70,10 +72,22 @@ async def get_random_candidate_batch(updater, event, scene: str) -> str:
         return "The LLM meme tool is disabled in plugin settings."
     if not updater._is_allowed_group(event):
         return "Meme generation is not enabled for this group."
+    if getattr(event, CANDIDATE_REQUEST_FLAG, False):
+        return json.dumps(
+            {
+                "candidate_count": 0,
+                "instruction": (
+                    "A candidate batch was already provided. Do not call either meme "
+                    "tool again in this turn; answer normally without a meme."
+                ),
+            },
+            separators=(",", ":"),
+        )
     await updater._refresh_meme_infos()
+    setattr(event, CANDIDATE_REQUEST_FLAG, True)
     infos = pick_random_meme_infos(updater._visible_meme_infos(event))
     if not infos:
-        return "No meme templates are currently available."
+        return "No templates are available. Do not call either meme tool again."
     return format_candidate_batch(scene, infos)
 
 

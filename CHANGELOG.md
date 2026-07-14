@@ -7,6 +7,9 @@
 - Each candidate request samples up to 50 visible, non-blocked templates.
 - The AI receives template keywords, tags, and image/text constraints before rendering.
 
+- Candidate data is now returned only to the Agent instead of being sent to chat.
+- A second candidate request in the same turn is rejected; no match means no meme.
+
 ## 0.2.7
 
 - 新增 `meme_list_render_timeout` 配置项：表情列表图渲染单独使用更长超时（默认 60 秒，且不会小于 `meme_request_timeout`），缓解表情库较大时列表渲染超时。

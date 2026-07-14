@@ -442,7 +442,8 @@ class MemeUpdater(Star):
         """Get 50 random available meme templates when a meme may suit the conversation.
 
         Choose a template using the full conversation, its keywords, tags, and input
-        constraints. Do not overuse memes. Request another batch if none fits.
+        constraints. If none fits, do not call either meme tool again in this turn;
+        answer normally without a meme.
 
         Args:
             scene(string): A short summary of the current scene, mood, and reply intent
@@ -451,9 +452,9 @@ class MemeUpdater(Star):
 
         try:
             result = await get_random_candidate_batch(self, event, scene)
-            yield event.plain_result(result)
+            return result
         except Exception as e:
-            yield event.plain_result(f"Failed to get meme candidates: {e}")
+            return f"Failed to get meme candidates: {e}"
 
     @filter.llm_tool(name="meme_generate_from_candidate")
     async def llm_meme_generate_from_candidate(
