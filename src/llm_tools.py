@@ -14,6 +14,7 @@ from .commands import (
 CANDIDATE_COUNT = 50
 CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
 GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
+GENERATION_ATTEMPT_FLAG = "_meme_llm_generation_attempts"
 
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
@@ -69,27 +70,18 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
     )
 
 
-async def get_random_candidate_batch(updater, event, scene: str) -> str:
+async def get_random_candidate_batch(updater, event, scene: str) -> str | None:
     if not updater.plugin_config.meme_llm_tool_enabled():
         return "The LLM meme tool is disabled in plugin settings."
     if not updater._is_allowed_group(event):
         return "Meme generation is not enabled for this group."
     if getattr(event, CANDIDATE_REQUEST_FLAG, False):
-        return json.dumps(
-            {
-                "candidate_count": 0,
-                "instruction": (
-                    "A candidate batch was already provided. Do not call either meme "
-                    "tool again in this turn; answer normally without a meme."
-                ),
-            },
-            separators=(",", ":"),
-        )
+        return None
     await updater._refresh_meme_infos()
     setattr(event, CANDIDATE_REQUEST_FLAG, True)
     infos = pick_random_meme_infos(updater._visible_meme_infos(event))
     if not infos:
-        return "No templates are available. Do not call either meme tool again."
+        return None
     return format_candidate_batch(scene, infos)
 
 
@@ -144,6 +136,11 @@ async def generate_meme_from_candidate(
             await _fill_default_avatar_images(
                 updater, event, images, user_infos, params["min_images"]
             )
+    if len(texts) > params["max_texts"]:
+        if params["max_texts"] <= 0:
+            texts = []
+        else:
+            texts = texts[: params["max_texts"]]
     if updater.plugin_config.meme_auto_default_texts() and not texts:
         texts.extend(str(value) for value in params["default_texts"])
 

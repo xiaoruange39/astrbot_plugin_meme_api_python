@@ -478,14 +478,27 @@ class MemeUpdater(Star):
             user_ids(array[string]): Numeric user IDs for avatar inputs
             use_sender_avatar(boolean): Allow sender/bot avatars when images are missing
         """
-        from .src.llm_tools import generate_meme_from_candidate
+        from .src.llm_tools import (
+            GENERATION_ATTEMPT_FLAG,
+            generate_meme_from_candidate,
+        )
+
+        attempts = int(getattr(event, GENERATION_ATTEMPT_FLAG, 0) or 0)
+        if attempts >= 2:
+            return None
+        current_attempt = attempts + 1
+        setattr(event, GENERATION_ATTEMPT_FLAG, current_attempt)
 
         try:
             result = await generate_meme_from_candidate(
                 self, event, meme_name, texts, image_urls, user_ids, use_sender_avatar
             )
+            if isinstance(result, str) and current_attempt >= 2:
+                return None
             return result
         except Exception as e:
+            if current_attempt >= 2:
+                return None
             return f"AI meme generation failed: {e}"
 
     @filter.custom_filter(PokeToBotFilter)
