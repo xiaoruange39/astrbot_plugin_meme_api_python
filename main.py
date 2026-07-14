@@ -484,9 +484,9 @@ class MemeUpdater(Star):
             result = await generate_meme_from_candidate(
                 self, event, meme_name, texts, image_urls, user_ids, use_sender_avatar
             )
-            yield result
+            return result
         except Exception as e:
-            yield event.plain_result(f"AI meme generation failed: {e}")
+            return f"AI meme generation failed: {e}"
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):

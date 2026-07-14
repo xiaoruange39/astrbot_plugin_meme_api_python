@@ -8,10 +8,12 @@ from .commands import (
     _image_component,
     _params_type,
     _resolve_generate_args,
+    _select_render_images,
 )
 
 CANDIDATE_COUNT = 50
 CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
+GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
 
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
@@ -101,9 +103,11 @@ async def generate_meme_from_candidate(
     use_sender_avatar: bool = True,
 ):
     if not updater.plugin_config.meme_llm_tool_enabled():
-        return event.plain_result("The LLM meme tool is disabled.")
+        return "The LLM meme tool is disabled."
     if not updater._is_allowed_group(event):
-        return event.plain_result("Meme generation is not enabled for this group.")
+        return "Meme generation is not enabled for this group."
+    if getattr(event, GENERATION_COMPLETE_FLAG, False):
+        return "A meme was already generated in this turn. Do not call this tool again."
 
     texts = _as_strings(texts, "texts", 20)
     image_urls = _as_strings(image_urls, "image_urls", 10)
@@ -114,16 +118,23 @@ async def generate_meme_from_candidate(
     await updater._refresh_meme_infos()
     visible_infos = updater._visible_meme_infos(event)
     if not visible_infos:
-        return event.plain_result("No meme templates are currently available.")
+        return "No meme templates are currently available."
     info = updater._find_meme(
         str(meme_name or "").strip(), visible_infos
     )
     if not info:
-        return event.plain_result(f"Meme template is unavailable: {meme_name}")
+        return f"Meme template is unavailable: {meme_name}"
 
     params = _params_type(info)
     tokens = [*image_urls, *(f"@{user_id}" for user_id in user_ids), *texts]
     images, texts, user_infos = await _resolve_generate_args(updater, event, tokens)
+    if len(images) > params["max_images"]:
+        if params["max_images"] <= 0:
+            images, user_infos = [], []
+        else:
+            images, user_infos = _select_render_images(
+                images, user_infos, params["max_images"]
+            )
     if use_sender_avatar and len(images) < params["min_images"]:
         if images:
             await _fill_sender_avatar_images(
@@ -138,19 +149,18 @@ async def generate_meme_from_candidate(
 
     if not (params["min_images"] <= len(images) <= params["max_images"]):
         expected = _format_range(params["min_images"], params["max_images"])
-        return event.plain_result(
-            f"This template needs {expected} images; got {len(images)}. "
-            "Choose another candidate or adjust image inputs."
+        return (
+            f"This template needs {expected} images; got {len(images)}."
         )
     if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
         expected = _format_range(params["min_texts"], params["max_texts"])
-        return event.plain_result(
-            f"This template needs {expected} text items; got {len(texts)}. "
-            "Adjust texts and try again."
+        return (
+            f"This template needs {expected} text items; got {len(texts)}."
         )
 
     image, content_type = await updater.meme_client.render_meme(
         str(info.get("key")), images, texts, user_infos, {}
     )
     await updater.usage_stats.record(event, info)
+    setattr(event, GENERATION_COMPLETE_FLAG, True)
     return event.chain_result([_image_component(updater, image, content_type)])

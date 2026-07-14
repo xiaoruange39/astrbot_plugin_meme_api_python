@@ -9,6 +9,7 @@
 
 - Candidate data is now returned only to the Agent instead of being sent to chat.
 - A second candidate request in the same turn is rejected; no match means no meme.
+- AI generation now trims excess images and keeps validation errors internal.
 
 ## 0.2.7
 
