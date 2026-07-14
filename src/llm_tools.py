@@ -160,4 +160,6 @@ async def generate_meme_from_candidate(
     )
     await updater.usage_stats.record(event, info)
     setattr(event, GENERATION_COMPLETE_FLAG, True)
-    return event.chain_result([_image_component(updater, image, content_type)])
+    result = event.chain_result([_image_component(updater, image, content_type)])
+    event.stop_event()
+    return result
