@@ -1,11 +1,13 @@
+import base64
 import json
 import random
+
+import mcp
 
 from .commands import (
     _fill_default_avatar_images,
     _fill_sender_avatar_images,
     _format_range,
-    _image_component,
     _params_type,
     _resolve_generate_args,
     _select_render_images,
@@ -14,6 +16,27 @@ from .commands import (
 CANDIDATE_COUNT = 50
 CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
 GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
+
+
+def build_meme_tool_result(image: bytes, content_type: str) -> mcp.types.CallToolResult:
+    """Return generated media through the standard LLM tool result channel."""
+    return mcp.types.CallToolResult(
+        content=[
+            mcp.types.TextContent(
+                type="text",
+                text=(
+                    "Meme generation succeeded. The image is the final result. "
+                    "Send it exactly once and do not call either meme tool again "
+                    "for this turn."
+                ),
+            ),
+            mcp.types.ImageContent(
+                type="image",
+                data=base64.b64encode(image).decode("ascii"),
+                mimeType=content_type or "image/png",
+            ),
+        ]
+    )
 
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
@@ -153,6 +176,4 @@ async def generate_meme_from_candidate(
     )
     await updater.usage_stats.record(event, info)
     setattr(event, GENERATION_COMPLETE_FLAG, True)
-    result = event.chain_result([_image_component(updater, image, content_type)])
-    event.stop_event()
-    return result
+    return build_meme_tool_result(image, content_type)
