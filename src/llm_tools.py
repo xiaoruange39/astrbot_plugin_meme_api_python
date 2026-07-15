@@ -19,14 +19,17 @@ GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
 MEME_SENT_RESULT = (
     "<meme_result status='sent' final='true'>"
     "The meme image has already been sent directly to the user. "
-    "Do not call meme tools again. Do not emit sticker/image/message output "
-    "for this turn; leave the next response empty."
+    "Do not call meme tools again and do not emit any message/sticker/image output. "
+    "Your final response must be non-empty XML with only a <status> tag, for example: "
+    "<status>mood: done\nstate: meme_sent\nthought: meme tool already sent the image\naction: stop_followup\nenergy: 80</status>. "
+    "Do not include any <message>, <sticker>, <image>, or text outside <status>."
     "</meme_result>"
 )
 MEME_SKIPPED_RESULT = (
     "<meme_result status='skipped' final='true'>"
-    "No suitable meme was sent. Do not call meme tools again and do not produce "
-    "a follow-up message for this turn."
+    "No suitable meme was sent. Do not call meme tools again and do not emit any "
+    "follow-up message. Your final response must be non-empty XML with only a "
+    "<status> tag; do not include <message> or text outside <status>."
     "</meme_result>"
 )
 
