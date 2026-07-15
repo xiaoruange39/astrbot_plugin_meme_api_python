@@ -953,7 +953,11 @@ async def meme_generate(updater, event: AstrMessageEvent):
 
 
 async def _resolve_generate_args(
-    updater, event: AstrMessageEvent, tokens: list[str]
+    updater,
+    event: AstrMessageEvent,
+    tokens: list[str],
+    *,
+    strict_explicit_images: bool = True,
 ) -> tuple[list[tuple[bytes, str, str]], list[str], list[dict]]:
     replied_segments = await get_replied_message_segments(updater, event)
     image_urls = extract_image_urls_from_segments(updater, replied_segments)
@@ -1022,7 +1026,11 @@ async def _resolve_generate_args(
         if explicit_failures:
             failure = explicit_failures[0]
             message = str(failure) or type(failure).__name__
-            raise RuntimeError(f"引用/输入图片下载失败：{message}")
+            if strict_explicit_images:
+                raise RuntimeError(f"引用/输入图片下载失败：{message}")
+            logger.warning(
+                f"LLM meme ignored unavailable explicit image input: {message}"
+            )
         images = [
             result for result in download_results if not isinstance(result, Exception)
         ]

@@ -51,6 +51,19 @@ def _brief(value, limit: int = 8) -> list[str]:
     return [str(item).strip() for item in value[:limit] if str(item).strip()]
 
 
+def _valid_image_locator(value: str) -> bool:
+    value = str(value or "").strip()
+    if not value:
+        return False
+    lower = value.lower()
+    if lower.startswith(("http://", "https://", "base64://", "data:image/")):
+        return True
+    # Allow explicit local paths for advanced/self-hosted deployments. Bare media
+    # hashes from chat history are intentionally ignored here: they are not URLs
+    # and would otherwise be misinterpreted as text inputs for meme templates.
+    return len(value) >= 3 and (value[1:3] in {":\\", ":/"} or value.startswith("/"))
+
+
 def pick_random_meme_infos(meme_infos: dict[str, dict], count: int) -> list[dict]:
     infos = list(meme_infos.values())
     return random.sample(infos, min(max(1, count), len(infos)))
@@ -80,9 +93,13 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
                 "If a meme would improve the conversation, choose the best candidate "
                 "and call meme_generate_from_candidate using the real XML tool-call "
                 "format: <tool_call name=\"meme_generate_from_candidate\">{...}</tool_call>. "
-                "Never write <tool_code>, default_api.*, or Python-like calls; those are "
-                "plain text and will not execute. If no candidate fits, do not call meme "
-                "tools again in this turn; continue naturally with text or no message as appropriate."
+                "Never write <tool_code> or Python-like calls; those are plain text and "
+                "will not execute. Use image_urls only for real image URLs/base64/local "
+                "paths, never media hashes; use user_ids for QQ avatars. Messages in the "
+                "same completion may be sent before the tool executes, so wait for the "
+                "tool result if you want a reply after the meme. If no candidate fits, "
+                "do not call meme tools again in this turn; continue naturally with text "
+                "or no message as appropriate."
             ),
             "candidates": candidates,
         },
@@ -125,7 +142,11 @@ async def generate_meme_from_candidate(
         return finish_without_meme(event)
 
     texts = _as_strings(texts, "texts", 20)
-    image_urls = _as_strings(image_urls, "image_urls", 10)
+    image_urls = [
+        value
+        for value in _as_strings(image_urls, "image_urls", 10)
+        if _valid_image_locator(value)
+    ]
     user_ids = _as_strings(user_ids, "user_ids", 10)
     if any(not user_id.isdigit() for user_id in user_ids):
         raise ValueError("user_ids may only contain numeric user IDs.")
@@ -142,7 +163,9 @@ async def generate_meme_from_candidate(
 
     params = _params_type(info)
     tokens = [*image_urls, *(f"@{user_id}" for user_id in user_ids), *texts]
-    images, texts, user_infos = await _resolve_generate_args(updater, event, tokens)
+    images, texts, user_infos = await _resolve_generate_args(
+        updater, event, tokens, strict_explicit_images=False
+    )
     if len(images) > params["max_images"]:
         if params["max_images"] <= 0:
             images, user_infos = [], []
