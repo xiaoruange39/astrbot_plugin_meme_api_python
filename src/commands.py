@@ -198,7 +198,7 @@ async def _try_send_small_image_aiocqhttp(
                 "data": {
                     "file": f"base64://{b64}",
                     # Different OneBot implementations look for different
-                    # spellings, so keep all three like Giftia does.
+                    # spellings, so keep all common variants.
                     "subType": 1,
                     "sub_type": 1,
                     "subtype": 1,
