@@ -12,7 +12,6 @@ from .commands import (
     _try_send_small_image_aiocqhttp,
 )
 
-CANDIDATE_COUNT = 50
 CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
 GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
 
@@ -52,9 +51,9 @@ def _brief(value, limit: int = 8) -> list[str]:
     return [str(item).strip() for item in value[:limit] if str(item).strip()]
 
 
-def pick_random_meme_infos(meme_infos: dict[str, dict]) -> list[dict]:
+def pick_random_meme_infos(meme_infos: dict[str, dict], count: int) -> list[dict]:
     infos = list(meme_infos.values())
-    return random.sample(infos, min(CANDIDATE_COUNT, len(infos)))
+    return random.sample(infos, min(max(1, count), len(infos)))
 
 
 def format_candidate_batch(scene: str, infos: list[dict]) -> str:
@@ -98,7 +97,9 @@ async def get_random_candidate_batch(updater, event, scene: str) -> str | None:
         return finish_without_meme(event)
     await updater._refresh_meme_infos()
     setattr(event, CANDIDATE_REQUEST_FLAG, True)
-    infos = pick_random_meme_infos(updater._visible_meme_infos(event))
+    infos = pick_random_meme_infos(
+        updater._visible_meme_infos(event), updater.plugin_config.meme_llm_candidate_count()
+    )
     if not infos:
         return finish_without_meme(event)
     return format_candidate_batch(scene, infos)

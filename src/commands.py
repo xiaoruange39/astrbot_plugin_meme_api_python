@@ -149,7 +149,7 @@ async def _try_send_small_image_aiocqhttp(
     data: bytes,
     *,
     text: str = "",
-    summary: str = "表情包",
+    summary: str | None = None,
 ) -> bool:
     """Send an image as a OneBot small sticker-like image on aiocqhttp.
 
@@ -171,6 +171,9 @@ async def _try_send_small_image_aiocqhttp(
         message = []
         if text.strip():
             message.append({"type": "text", "data": {"text": text}})
+        summary_text = summary
+        if summary_text is None:
+            summary_text = random.choice(updater.plugin_config.meme_small_image_summaries())
         b64 = base64.b64encode(data).decode("ascii")
         message.append(
             {
@@ -182,7 +185,7 @@ async def _try_send_small_image_aiocqhttp(
                     "subType": 1,
                     "sub_type": 1,
                     "subtype": 1,
-                    "summary": summary,
+                    "summary": summary_text,
                 },
             }
         )
