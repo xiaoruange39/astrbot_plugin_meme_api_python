@@ -1,13 +1,11 @@
-import base64
 import json
 import random
-
-import mcp
 
 from .commands import (
     _fill_default_avatar_images,
     _fill_sender_avatar_images,
     _format_range,
+    _image_component,
     _params_type,
     _resolve_generate_args,
     _select_render_images,
@@ -18,26 +16,24 @@ CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
 GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
 
 
-def build_meme_tool_result(image: bytes, content_type: str) -> mcp.types.CallToolResult:
-    """Return generated media through the standard LLM tool result channel."""
-    return mcp.types.CallToolResult(
-        content=[
-            mcp.types.TextContent(
-                type="text",
-                text=(
-                    "Meme generation succeeded. The image is the final result. "
-                    "Send it exactly once and do not call either meme tool again "
-                    "for this turn."
-                ),
-            ),
-            mcp.types.ImageContent(
-                type="image",
-                data=base64.b64encode(image).decode("ascii"),
-                mimeType=content_type or "image/png",
-            ),
-        ]
-    )
+MEME_SENT_RESULT = (
+    "<meme_result status='sent' final='true'>"
+    "The meme image has already been sent directly to the user. "
+    "Do not call meme tools again. Do not emit sticker/image/message output "
+    "for this turn; leave the next response empty."
+    "</meme_result>"
+)
+MEME_SKIPPED_RESULT = (
+    "<meme_result status='skipped' final='true'>"
+    "No suitable meme was sent. Do not call meme tools again and do not produce "
+    "a follow-up message for this turn."
+    "</meme_result>"
+)
 
+
+def finish_without_meme(event) -> str:
+    event.stop_event()
+    return MEME_SKIPPED_RESULT
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
     if value is None:
@@ -98,12 +94,12 @@ async def get_random_candidate_batch(updater, event, scene: str) -> str | None:
     if not updater._is_allowed_group(event):
         return None
     if getattr(event, CANDIDATE_REQUEST_FLAG, False):
-        return None
+        return finish_without_meme(event)
     await updater._refresh_meme_infos()
     setattr(event, CANDIDATE_REQUEST_FLAG, True)
     infos = pick_random_meme_infos(updater._visible_meme_infos(event))
     if not infos:
-        return None
+        return finish_without_meme(event)
     return format_candidate_batch(scene, infos)
 
 
@@ -121,7 +117,7 @@ async def generate_meme_from_candidate(
     if not updater._is_allowed_group(event):
         return None
     if getattr(event, GENERATION_COMPLETE_FLAG, False):
-        return None
+        return finish_without_meme(event)
 
     texts = _as_strings(texts, "texts", 20)
     image_urls = _as_strings(image_urls, "image_urls", 10)
@@ -132,12 +128,12 @@ async def generate_meme_from_candidate(
     await updater._refresh_meme_infos()
     visible_infos = updater._visible_meme_infos(event)
     if not visible_infos:
-        return None
+        return finish_without_meme(event)
     info = updater._find_meme(
         str(meme_name or "").strip(), visible_infos
     )
     if not info:
-        return None
+        return finish_without_meme(event)
 
     params = _params_type(info)
     tokens = [*image_urls, *(f"@{user_id}" for user_id in user_ids), *texts]
@@ -167,13 +163,17 @@ async def generate_meme_from_candidate(
         texts.extend(str(value) for value in params["default_texts"])
 
     if not (params["min_images"] <= len(images) <= params["max_images"]):
-        return None
+        return finish_without_meme(event)
     if not (params["min_texts"] <= len(texts) <= params["max_texts"]):
-        return None
+        return finish_without_meme(event)
 
     image, content_type = await updater.meme_client.render_meme(
         str(info.get("key")), images, texts, user_infos, {}
     )
+    await event.send(
+        event.chain_result([_image_component(updater, image, content_type)])
+    )
     await updater.usage_stats.record(event, info)
     setattr(event, GENERATION_COMPLETE_FLAG, True)
-    return build_meme_tool_result(image, content_type)
+    event.stop_event()
+    return MEME_SENT_RESULT

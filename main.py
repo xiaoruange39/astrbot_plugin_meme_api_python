@@ -448,7 +448,10 @@ class MemeUpdater(Star):
         Args:
             scene(string): A short summary of the current scene, mood, and reply intent
         """
-        from .src.llm_tools import get_random_candidate_batch
+        from .src.llm_tools import (
+            MEME_SKIPPED_RESULT,
+            get_random_candidate_batch,
+        )
 
         try:
             result = await get_random_candidate_batch(self, event, scene)
@@ -458,7 +461,7 @@ class MemeUpdater(Star):
         except Exception as e:
             logger.warning(f"Failed to get meme candidates: {e}", exc_info=True)
             event.stop_event()
-            return None
+            return MEME_SKIPPED_RESULT
 
     @filter.llm_tool(name="meme_generate_from_candidate")
     async def llm_meme_generate_from_candidate(
@@ -483,7 +486,10 @@ class MemeUpdater(Star):
             user_ids(array[string]): Numeric user IDs for avatar inputs
             use_sender_avatar(boolean): Allow sender/bot avatars when images are missing
         """
-        from .src.llm_tools import generate_meme_from_candidate
+        from .src.llm_tools import (
+            MEME_SKIPPED_RESULT,
+            generate_meme_from_candidate,
+        )
 
         try:
             result = await generate_meme_from_candidate(
@@ -498,7 +504,7 @@ class MemeUpdater(Star):
                 exc_info=True,
             )
             event.stop_event()
-            return None
+            return MEME_SKIPPED_RESULT
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):
