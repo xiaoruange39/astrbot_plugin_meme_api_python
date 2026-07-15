@@ -3,15 +3,15 @@
 
 ## 0.2.8
 
-- Added an opt-in autonomous LLM meme workflow with a plugin configuration switch.
-- Candidate requests sample a configurable number of visible, non-blocked templates.
-- The AI receives template keywords, tags, image/text constraints, and default text before rendering.
-- Candidate data is returned only to the Agent instead of being sent to chat.
-- The AI can decide whether to reply with text, generate a meme, do both, or do nothing when no meme fits.
-- Generated memes can be sent as QQ small-image stickers with configurable external summary text.
-- Current-message and replied-message images are resolved from raw AstrBot/OneBot events, avoiding unusable model-side temporary media URLs when possible.
-- A short-lived per-message lock prevents repeated LLM meme generation in recursive tool loops.
-- AI generation trims excess images, ignores unavailable explicit image inputs in the LLM path, and keeps validation errors internal.
+- 新增可选的 AI 自主表情包流程，可通过 `meme_llm_tool_enabled` 配置项启用。
+- AI 候选模板抽样数量改为可配置，仅从当前群可见、未屏蔽的表情模板中抽取。
+- 候选数据会向 AI 提供模板 key、关键词、标签、图片/文字数量限制和默认文字。
+- 候选表情数据只返回给 Agent，不会直接发到聊天。
+- AI 可根据上下文自行决定只文字回复、只发表情包、图文都发，或者在没有合适模板时不使用表情工具。
+- 生成的表情包支持按 QQ 小图表情包样式发送，并支持配置外显文字。
+- AI 表情生成会尽量从 AstrBot/OneBot 原始事件中解析当前消息和引用消息的图片，避免依赖模型侧临时媒体 URL。
+- 新增同一触发消息的短时间生成锁，避免工具循环中重复生成多张 AI 表情包。
+- AI 生成路径会裁剪过量图片、忽略不可用的显式图片输入，并将参数校验错误保持在工具内部。
 
 ## 0.2.7
 
