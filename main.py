@@ -459,6 +459,32 @@ class MemeUpdater(Star):
             logger.warning(f"Failed to get meme candidates: {e}", exc_info=True)
             return MEME_SKIPPED_RESULT
 
+    @filter.llm_tool(name="meme_search_candidates")
+    async def llm_meme_search_candidates(
+        self, event: AstrMessageEvent, query: str, scene: str = ""
+    ):
+        """模糊搜索当前会话可用的表情包模板，搜不到时不制作也不发送。
+
+        适用于模型已经知道想找的表情方向、关键词或梗名时。模糊搜索会复用
+        meme搜索 的匹配规则，并自动排除当前群不可见或已屏蔽的模板。
+        找到候选后，模型可再选择一个模板生成表情包；没有候选时工具会直接返回跳过结果。
+
+        Args:
+            query(string): 要模糊搜索的表情关键词、模板 key、标签或快捷句式
+            scene(string): 当前场景、语气和想表达效果的简短描述
+        """
+        from .src.llm_tools import (
+            MEME_SKIPPED_RESULT,
+            search_candidate_batch,
+        )
+
+        try:
+            result = await search_candidate_batch(self, event, query, scene)
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to search meme candidates: {e}", exc_info=True)
+            return MEME_SKIPPED_RESULT
+
     @filter.llm_tool(name="meme_generate_from_candidate")
     async def llm_meme_generate_from_candidate(
         self,
