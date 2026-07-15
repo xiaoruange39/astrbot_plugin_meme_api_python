@@ -439,18 +439,13 @@ class MemeUpdater(Star):
     async def llm_meme_get_random_candidates(
         self, event: AstrMessageEvent, scene: str
     ):
-        """Get a random batch of meme templates when a meme may suit the conversation.
+        """随机抽取一批当前会话可用的表情包模板，供模型按上下文选择。
 
-        Use this when you are considering a meme as one possible response action.
-        You may also send normal <message> replies in the same turn, but tool use
-        must be a real sibling <tool_call name="meme_get_random_candidates">JSON</tool_call>
-        action, not <tool_code>, default_api.*, or text inside a message. If
-        previous tool_results contain <meme_result final='true'>, do not call meme
-        tools again. After reviewing candidates, either call meme_generate_from_candidate
-        with a real <tool_call> for one suitable meme or continue normally if no meme fits.
+        适用于模型想判断「要不要做一张表情包」的场景。返回内容只供模型使用，
+        不会直接发到聊天。同一条触发消息已经生成过表情包时，工具会直接返回已处理结果。
 
         Args:
-            scene(string): A short summary of the current scene, mood, and reply intent
+            scene(string): 当前场景、语气和想表达效果的简短描述
         """
         from .src.llm_tools import (
             MEME_SKIPPED_RESULT,
@@ -474,23 +469,18 @@ class MemeUpdater(Star):
         user_ids: list[str] | None = None,
         use_sender_avatar: bool = True,
     ):
-        """Generate and send one meme selected from meme_get_random_candidates.
+        """根据候选模板生成并直接发送一张表情包。
 
-        Images in the current or replied-to message are used automatically. Invoke
-        this only through a real sibling <tool_call name="meme_generate_from_candidate">JSON</tool_call>
-        action. Do not write <tool_code>, default_api.*, or Python-like calls; they
-        are plain text and will not execute. The generated meme is sent directly by
-        the tool. After the tool result, decide naturally whether to also send a
-        short text reply, send no extra message, or continue with other non-meme
-        actions. If previous tool_results contain <meme_result final='true'>, do not
-        call this tool again. Do not call this tool twice in the same turn.
+        当前消息和引用消息里的图片会自动作为素材使用；也可额外传入图片 URL
+        或 QQ 号头像素材。表情包发出后，模型仍可自行决定是否再补一条文字回复。
+        同一条触发消息最多只会生成一次表情包。
 
         Args:
-            meme_name(string): The key of a template from the candidate batch
-            texts(array[string]): Text items required by the template, or an empty array
-            image_urls(array[string]): Additional image URLs, or an empty array
-            user_ids(array[string]): Numeric user IDs for avatar inputs
-            use_sender_avatar(boolean): Allow sender/bot avatars when images are missing
+            meme_name(string): 候选批次中的模板 key
+            texts(array[string]): 模板需要的文字，没有则传空数组
+            image_urls(array[string]): 额外图片 URL，没有则传空数组；不要传媒体哈希
+            user_ids(array[string]): 用作头像素材的 QQ 号数组
+            use_sender_avatar(boolean): 图片不足时是否允许自动补发送者/机器人头像
         """
         from .src.llm_tools import (
             MEME_SKIPPED_RESULT,

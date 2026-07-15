@@ -3,15 +3,15 @@
 
 ## 0.2.8
 
-- Added an opt-in LLM meme workflow with a plugin configuration switch.
-- Each candidate request samples up to 50 visible, non-blocked templates.
-- The AI receives template keywords, tags, and image/text constraints before rendering.
-
-- Candidate data is now returned only to the Agent instead of being sent to chat.
-- A second candidate request in the same turn is rejected; no match means no meme.
-- Candidate lookup or meme generation failures now stop silently without another LLM reply.
-- A successfully sent LLM meme now stops the source event to prevent duplicate LLM runs and images.
-- AI generation now trims excess images and keeps validation errors internal.
+- Added an opt-in autonomous LLM meme workflow with a plugin configuration switch.
+- Candidate requests sample a configurable number of visible, non-blocked templates.
+- The AI receives template keywords, tags, image/text constraints, and default text before rendering.
+- Candidate data is returned only to the Agent instead of being sent to chat.
+- The AI can decide whether to reply with text, generate a meme, do both, or do nothing when no meme fits.
+- Generated memes can be sent as QQ small-image stickers with configurable external summary text.
+- Current-message and replied-message images are resolved from raw AstrBot/OneBot events, avoiding unusable model-side temporary media URLs when possible.
+- A short-lived per-message lock prevents repeated LLM meme generation in recursive tool loops.
+- AI generation trims excess images, ignores unavailable explicit image inputs in the LLM path, and keeps validation errors internal.
 
 ## 0.2.7
 
