@@ -167,13 +167,30 @@ async def _try_send_small_image_aiocqhttp(
     ):
         return False
 
+    def _response_message_id(payload) -> object | None:
+        if isinstance(payload, (int, str)) and str(payload).strip():
+            return payload
+        attr_message_id = getattr(payload, "message_id", None)
+        if attr_message_id:
+            return attr_message_id
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("message_id"):
+            return payload.get("message_id")
+        data_payload = payload.get("data")
+        if isinstance(data_payload, dict) and data_payload.get("message_id"):
+            return data_payload.get("message_id")
+        return None
+
     try:
         message = []
         if text.strip():
             message.append({"type": "text", "data": {"text": text}})
         summary_text = summary
         if summary_text is None:
-            summary_text = random.choice(updater.plugin_config.meme_small_image_summaries())
+            summary_text = random.choice(
+                updater.plugin_config.meme_small_image_summaries()
+            )
         b64 = base64.b64encode(data).decode("ascii")
         message.append(
             {
@@ -192,14 +209,17 @@ async def _try_send_small_image_aiocqhttp(
 
         group_id_value = event.get_group_id()
         if group_id_value:
-            await event.bot.send_group_msg(
+            resp = await event.bot.send_group_msg(
                 group_id=int(group_id_value), message=message
             )
         else:
-            await event.bot.send_private_msg(
+            resp = await event.bot.send_private_msg(
                 user_id=int(event.get_sender_id()), message=message
             )
-        return True
+        if _response_message_id(resp):
+            return True
+        logger.warning(f"小图表情包发送未返回 message_id，降级为普通图片: {resp}")
+        return False
     except Exception as e:
         logger.warning(f"发送小图表情包失败，降级为普通图片: {e}")
         return False
