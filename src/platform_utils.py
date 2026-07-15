@@ -542,26 +542,54 @@ def segment_text(segment: object) -> str:
 
 
 def extract_message_text(updater, event: AstrMessageEvent) -> str:
-    """Extracts the full text string from the event message segments.
+    """Extracts text from the first usable message source.
 
-    Args:
-        updater: The MemeUpdater instance.
-        event: The AstrMessageEvent.
-
-    Returns:
-        The extracted message text.
+    Image/reply resolution intentionally merges several raw event sources, but text
+    extraction should not do that: command events may expose both a stripped text
+    segment (for example, ``骑猪``) and the raw message (``#meme搜索 骑猪``). Joining
+    those sources produces duplicated text such as ``骑猪#meme搜索 骑猪``.
     """
-    text = "".join(
-        segment_text(segment) for segment in extract_segments_from_event(event)
-    ).strip()
-    if text:
-        return text
+
+    def text_from_segments(value: object) -> str:
+        if isinstance(value, list):
+            return "".join(segment_text(segment) for segment in value).strip()
+        if isinstance(value, dict):
+            message = value.get("message")
+            if isinstance(message, list):
+                text = text_from_segments(message)
+                if text:
+                    return text
+            data = value.get("data")
+            if isinstance(data, dict):
+                message = data.get("message")
+                if isinstance(message, list):
+                    text = text_from_segments(message)
+                    if text:
+                        return text
+        return ""
+
+    get_messages = getattr(event, "get_messages", None)
+    if callable(get_messages):
+        try:
+            text = text_from_segments(get_messages())
+            if text:
+                return text
+        except Exception:
+            pass
+
     message_obj = getattr(event, "message_obj", None)
     for value in (
         getattr(message_obj, "message", None),
         getattr(event, "message", None),
+        getattr(message_obj, "raw_message", None),
+        getattr(message_obj, "raw_event", None),
+        getattr(event, "raw_message", None),
+        getattr(event, "raw_event", None),
     ):
-        if isinstance(value, str):
+        text = text_from_segments(value)
+        if text:
+            return text
+        if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
 
@@ -592,14 +620,14 @@ def get_message_args(updater, event: AstrMessageEvent, command_name: str) -> str
     if not message:
         return ""
 
+    idx = message.rfind(command_name)
+    if idx != -1:
+        return message[idx + len(command_name) :].strip()
+
     parts = message.split(maxsplit=1)
     if parts:
         p0 = parts[0].lstrip("#/％%")
         if p0 == command_name or p0.endswith(command_name):
             return parts[1] if len(parts) > 1 else ""
 
-    idx = message.find(command_name)
-    if idx != -1:
-        return message[idx + len(command_name) :].strip()
-
-    return ""
+    return message.strip()

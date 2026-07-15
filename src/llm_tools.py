@@ -1,5 +1,6 @@
 import json
 import random
+import re
 import time
 
 from .image_resolver import raw_event_dict_from_event
@@ -25,7 +26,8 @@ MEME_SENT_RESULT = (
     "<meme_result status='sent' final='true'>"
     "The meme image has already been sent directly to the user. "
     "A meme has already been generated for this user message. Do not call "
-    "meme_get_random_candidates or meme_generate_from_candidate again in this "
+    "meme_get_random_candidates, meme_search_candidates, or "
+    "meme_generate_from_candidate again in this "
     "tool loop. You may still decide whether "
     "to send a normal follow-up reply, or send no message, based on the conversation. "
     "If you reply, do not repeat the image or mention internal tool details."
@@ -157,6 +159,58 @@ def pick_random_meme_infos(meme_infos: dict[str, dict], count: int) -> list[dict
     return random.sample(infos, min(max(1, count), len(infos)))
 
 
+def search_meme_infos(updater, event, query: str, limit: int) -> list[dict]:
+    visible_infos = updater._visible_meme_infos(event)
+    query = str(query or "").strip()
+    if not query:
+        return []
+
+    matches = updater._search_memes(query, visible_infos, limit=limit)
+    if matches:
+        return matches
+
+    seen = set()
+    fallback_matches = []
+    tokens = [
+        token.strip().lower()
+        for token in re.split(r"[\s,，。；;、/|]+", query)
+        if token.strip()
+    ]
+    for token in tokens:
+        if len(token) < 2:
+            continue
+        for info in updater._search_memes(token, visible_infos, limit=limit):
+            key = str(info.get("key", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            fallback_matches.append(info)
+            if len(fallback_matches) >= limit:
+                return fallback_matches
+    if fallback_matches:
+        return fallback_matches
+
+    compact_query = "".join(tokens) if tokens else query.lower()
+    grams = {
+        compact_query[index : index + 2]
+        for index in range(max(0, len(compact_query) - 1))
+        if len(compact_query[index : index + 2]) == 2
+    }
+    if not grams:
+        return []
+
+    min_score = 2 if len(grams) >= 3 else 1
+    scored_matches = []
+    for info in updater._sorted_meme_infos(visible_infos):
+        search_text = updater._meme_search_text(info)
+        score = sum(1 for gram in grams if gram in search_text)
+        if score < min_score:
+            continue
+        scored_matches.append((score, info))
+    scored_matches.sort(key=lambda item: item[0], reverse=True)
+    return [info for _, info in scored_matches[:limit]]
+
+
 def format_candidate_batch(scene: str, infos: list[dict]) -> str:
     candidates = []
     for info in infos:
@@ -215,6 +269,36 @@ async def get_random_candidate_batch(updater, event, scene: str) -> str | None:
     if not infos:
         return finish_without_meme(event)
     return format_candidate_batch(scene, infos)
+
+
+async def search_candidate_batch(
+    updater, event, query: str, scene: str = ""
+) -> str | None:
+    if not updater.plugin_config.meme_llm_tool_enabled():
+        return None
+    if not updater._is_allowed_group(event):
+        return None
+    if getattr(event, GENERATION_COMPLETE_FLAG, False) or _is_generation_locked(
+        updater, event
+    ):
+        return MEME_SENT_RESULT
+    if getattr(event, CANDIDATE_REQUEST_FLAG, False):
+        return finish_without_meme(event)
+
+    await updater._refresh_meme_infos()
+    setattr(event, CANDIDATE_REQUEST_FLAG, True)
+    limit = updater.plugin_config.meme_llm_candidate_count()
+    infos = search_meme_infos(updater, event, query, limit)
+    if not infos:
+        return finish_without_meme(event)
+
+    scene_text = str(scene or "").strip()
+    query_text = str(query or "").strip()
+    if scene_text:
+        scene_text = f"{scene_text} | search_query={query_text}"
+    else:
+        scene_text = f"search_query={query_text}"
+    return format_candidate_batch(scene_text, infos)
 
 
 async def generate_meme_from_candidate(
