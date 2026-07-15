@@ -869,7 +869,7 @@ async def meme_info(updater, event: AstrMessageEvent):
             lines.extend(
                 [
                     "",
-                    f"预览图：获取失败，请检查 meme API 地址、服务或反向代理：{base_url}",
+                    "预览图：获取失败，请检查 meme API 服务或反向代理配置。",
                 ]
             )
             yield event.plain_result("\n".join(lines))
