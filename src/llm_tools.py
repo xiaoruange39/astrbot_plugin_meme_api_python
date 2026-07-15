@@ -19,23 +19,20 @@ GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
 MEME_SENT_RESULT = (
     "<meme_result status='sent' final='true'>"
     "The meme image has already been sent directly to the user. "
-    "Do not call meme tools again and do not emit any message/sticker/image output. "
-    "Your final response must be non-empty XML with only a <status> tag, for example: "
-    "<status>mood: done\nstate: meme_sent\nthought: meme tool already sent the image\naction: stop_followup\nenergy: 80</status>. "
-    "Do not include any <message>, <sticker>, <image>, or text outside <status>."
+    "Do not call meme tools again for this turn. You may still decide whether "
+    "to send a normal follow-up reply, or send no message, based on the conversation. "
+    "If you reply, do not repeat the image or mention internal tool details."
     "</meme_result>"
 )
 MEME_SKIPPED_RESULT = (
     "<meme_result status='skipped' final='true'>"
-    "No suitable meme was sent. Do not call meme tools again and do not emit any "
-    "follow-up message. Your final response must be non-empty XML with only a "
-    "<status> tag; do not include <message> or text outside <status>."
+    "No suitable meme was sent. Do not call meme tools again for this turn. "
+    "Continue the conversation naturally if a text reply is appropriate."
     "</meme_result>"
 )
 
 
 def finish_without_meme(event) -> str:
-    event.stop_event()
     return MEME_SKIPPED_RESULT
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
@@ -80,9 +77,10 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
             "scene": str(scene or "").strip(),
             "candidate_count": len(candidates),
             "instruction": (
-                "Choose the candidate that best fits the full conversation, then call "
-                "meme_generate_from_candidate. If none fits, do not call either meme "
-                "tool or answer again in this turn; end silently without a meme."
+                "If a meme would improve the conversation, choose the best candidate "
+                "and call meme_generate_from_candidate. If no candidate fits, do not "
+                "call meme tools again in this turn; continue naturally with text or "
+                "no message as appropriate."
             ),
             "candidates": candidates,
         },
@@ -181,5 +179,4 @@ async def generate_meme_from_candidate(
         )
     await updater.usage_stats.record(event, info)
     setattr(event, GENERATION_COMPLETE_FLAG, True)
-    event.stop_event()
     return MEME_SENT_RESULT

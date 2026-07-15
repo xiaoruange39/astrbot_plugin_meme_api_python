@@ -439,11 +439,12 @@ class MemeUpdater(Star):
     async def llm_meme_get_random_candidates(
         self, event: AstrMessageEvent, scene: str
     ):
-        """Get 50 random available meme templates when a meme may suit the conversation.
+        """Get a random batch of meme templates when a meme may suit the conversation.
 
-        Choose a template using the full conversation, its keywords, tags, and input
-        constraints. If none fits, end the turn silently without calling another
-        tool or producing a follow-up answer.
+        Use this when you are considering a meme as one possible response action.
+        You may reply normally before or after using meme tools. After reviewing
+        candidates, either call meme_generate_from_candidate for one suitable meme
+        or continue with a normal reply if no meme fits.
 
         Args:
             scene(string): A short summary of the current scene, mood, and reply intent
@@ -455,12 +456,9 @@ class MemeUpdater(Star):
 
         try:
             result = await get_random_candidate_batch(self, event, scene)
-            if result is None:
-                event.stop_event()
             return result
         except Exception as e:
             logger.warning(f"Failed to get meme candidates: {e}", exc_info=True)
-            event.stop_event()
             return MEME_SKIPPED_RESULT
 
     @filter.llm_tool(name="meme_generate_from_candidate")
@@ -473,11 +471,13 @@ class MemeUpdater(Star):
         user_ids: list[str] | None = None,
         use_sender_avatar: bool = True,
     ):
-        """Generate a meme selected from meme_get_random_candidates.
+        """Generate and send one meme selected from meme_get_random_candidates.
 
-        Images in the current or replied-to message are used automatically. On
-        success, send exactly one meme. On failure, end silently without retrying
-        the tool or producing a follow-up answer.
+        Images in the current or replied-to message are used automatically. The
+        generated meme is sent directly by the tool. After the tool result, decide
+        naturally whether to also send a short text reply, send no extra message,
+        or continue with other non-meme actions. Do not call this tool twice in the
+        same turn.
 
         Args:
             meme_name(string): The key of a template from the candidate batch
@@ -495,15 +495,12 @@ class MemeUpdater(Star):
             result = await generate_meme_from_candidate(
                 self, event, meme_name, texts, image_urls, user_ids, use_sender_avatar
             )
-            if result is None:
-                event.stop_event()
             return result
         except Exception as e:
             logger.warning(
                 f"AI meme generation failed: {e}",
                 exc_info=True,
             )
-            event.stop_event()
             return MEME_SKIPPED_RESULT
 
     @filter.custom_filter(PokeToBotFilter)
