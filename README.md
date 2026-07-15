@@ -79,7 +79,7 @@ mkdir /root/memeapi
 | `meme_usage_stats_title` | `表情统计` 图片顶部标题。 |
 | `meme_shortcut_enabled` | 是否启用表情快捷指令匹配。 |
 | `meme_poke_random_enabled` | 是否启用戳一戳机器人时发送随机表情。 |
-| `meme_llm_tool_enabled` | Enable the opt-in LLM tools that choose from 50 random visible templates and generate a context-appropriate meme. |
+| `meme_llm_tool_enabled` | 是否启用 AI 自主表情包工具；开启后模型可按上下文决定是否制作表情包、是否继续文字回复，同一条触发消息最多生成一次。 |
 | `meme_auto_default_texts` | 未提供文字时是否使用 meme API 返回的默认文字。 |
 | `meme_auto_sender_avatar` | 图片数量不足时是否自动补当前发送者头像。 |
 | `meme_list_text_template` | 表情列表渲染模板，默认 `{index}. {keywords}`。 |
@@ -108,14 +108,16 @@ mkdir /root/memeapi
 
 开启 `meme_poke_random_enabled` 后，用户戳一戳机器人也会发送一张随机表情。
 
-### LLM autonomous meme tools
+### AI 自主表情包工具
 
-Enable `meme_llm_tool_enabled` and reload the plugin. The plugin exposes two tools:
+开启 `meme_llm_tool_enabled` 并重载插件后，模型会获得两个工具：
 
-- `meme_get_random_candidates`: returns up to 50 random templates that are visible in the current group.
-- `meme_generate_from_candidate`: renders the template selected by the AI.
+- `meme_get_random_candidates`：按配置数量随机抽取当前群可见、未屏蔽的模板，返回给模型做选择。
+- `meme_generate_from_candidate`：根据模型选中的模板生成并直接发送表情包。
 
-The candidate payload includes keywords, tags, image/text limits, and default text. Disabled templates and group restrictions are respected. If no candidate fits, the AI should stop using meme tools for that turn and answer normally.
+候选数据包含模板 key、关键词、标签、图片/文字数量限制和默认文字。当前消息、引用消息中的图片会自动作为素材使用，也可以用 QQ 号头像作为素材。模型可以按上下文决定：只文字回复、只发表情包、先文字后表情包，或发完表情包后再补一句文字。
+
+为避免刷屏，同一条触发消息最多生成一次 AI 表情包；工具返回 `<meme_result final='true'>` 后，后续 LLM 循环会拒绝再次生成。未找到合适模板或生成失败时，工具结果只返回给模型，由模型自然决定是否继续文字回复。
 
 开启快捷指令后，可以直接发送 meme API 返回的关键词或快捷句式，例如：
 

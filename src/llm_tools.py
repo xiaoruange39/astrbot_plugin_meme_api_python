@@ -185,9 +185,9 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
                 "will not execute. Use image_urls only for real image URLs/base64/local "
                 "paths, never media hashes; use user_ids for QQ avatars. Messages in the "
                 "same completion may be sent before the tool executes, so wait for the "
-                "tool result if you want a reply after the meme. If no candidate fits, "
-                "do not call meme tools again in this turn; continue naturally with text "
-                "or no message as appropriate."
+                "tool result if you want a reply after the meme. If tool_results already "
+                "contain <meme_result final='true'>, do not call meme tools again. If no "
+                "candidate fits, continue naturally with text or no message as appropriate."
             ),
             "candidates": candidates,
         },

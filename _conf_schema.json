@@ -112,8 +112,8 @@
     "default": false
   },
   "meme_llm_tool_enabled": {
-    "description": "Enable autonomous LLM meme tools",
-    "hint": "Disabled by default. The AI receives 50 random visible templates per batch and chooses one using the conversation context.",
+    "description": "启用 AI 自主表情包工具",
+    "hint": "默认关闭。开启后，大模型可按聊天上下文自行决定是否挑选模板并制作表情包；发送表情后仍可由模型决定是否继续文字回复。同一条触发消息只允许生成一次表情包，避免重复发图。",
     "type": "bool",
     "default": false
   },
