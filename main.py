@@ -442,9 +442,11 @@ class MemeUpdater(Star):
         """Get a random batch of meme templates when a meme may suit the conversation.
 
         Use this when you are considering a meme as one possible response action.
-        You may reply normally before or after using meme tools. After reviewing
-        candidates, either call meme_generate_from_candidate for one suitable meme
-        or continue with a normal reply if no meme fits.
+        You may also send normal <message> replies in the same turn, but tool use
+        must be a real sibling <tool_call name="meme_get_random_candidates">JSON</tool_call>
+        action, not <tool_code>, default_api.*, or text inside a message. After
+        reviewing candidates, either call meme_generate_from_candidate with a real
+        <tool_call> for one suitable meme or continue normally if no meme fits.
 
         Args:
             scene(string): A short summary of the current scene, mood, and reply intent
@@ -473,11 +475,13 @@ class MemeUpdater(Star):
     ):
         """Generate and send one meme selected from meme_get_random_candidates.
 
-        Images in the current or replied-to message are used automatically. The
-        generated meme is sent directly by the tool. After the tool result, decide
-        naturally whether to also send a short text reply, send no extra message,
-        or continue with other non-meme actions. Do not call this tool twice in the
-        same turn.
+        Images in the current or replied-to message are used automatically. Invoke
+        this only through a real sibling <tool_call name="meme_generate_from_candidate">JSON</tool_call>
+        action. Do not write <tool_code>, default_api.*, or Python-like calls; they
+        are plain text and will not execute. The generated meme is sent directly by
+        the tool. After the tool result, decide naturally whether to also send a
+        short text reply, send no extra message, or continue with other non-meme
+        actions. Do not call this tool twice in the same turn.
 
         Args:
             meme_name(string): The key of a template from the candidate batch

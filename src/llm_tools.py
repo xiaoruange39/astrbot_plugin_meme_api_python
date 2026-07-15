@@ -78,9 +78,11 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
             "candidate_count": len(candidates),
             "instruction": (
                 "If a meme would improve the conversation, choose the best candidate "
-                "and call meme_generate_from_candidate. If no candidate fits, do not "
-                "call meme tools again in this turn; continue naturally with text or "
-                "no message as appropriate."
+                "and call meme_generate_from_candidate using the real XML tool-call "
+                "format: <tool_call name=\"meme_generate_from_candidate\">{...}</tool_call>. "
+                "Never write <tool_code>, default_api.*, or Python-like calls; those are "
+                "plain text and will not execute. If no candidate fits, do not call meme "
+                "tools again in this turn; continue naturally with text or no message as appropriate."
             ),
             "candidates": candidates,
         },
