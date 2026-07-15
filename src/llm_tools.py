@@ -9,6 +9,7 @@ from .commands import (
     _params_type,
     _resolve_generate_args,
     _select_render_images,
+    _try_send_small_image_aiocqhttp,
 )
 
 CANDIDATE_COUNT = 50
@@ -170,9 +171,10 @@ async def generate_meme_from_candidate(
     image, content_type = await updater.meme_client.render_meme(
         str(info.get("key")), images, texts, user_infos, {}
     )
-    await event.send(
-        event.chain_result([_image_component(updater, image, content_type)])
-    )
+    if not await _try_send_small_image_aiocqhttp(updater, event, image):
+        await event.send(
+            event.chain_result([_image_component(updater, image, content_type)])
+        )
     await updater.usage_stats.record(event, info)
     setattr(event, GENERATION_COMPLETE_FLAG, True)
     event.stop_event()

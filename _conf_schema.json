@@ -129,6 +129,12 @@
     "type": "bool",
     "default": true
   },
+  "meme_send_small_image_enabled": {
+    "description": "生成表情按小图发送",
+    "hint": "开启后，在 aiocqhttp/NapCat/Lagrange 等 OneBot 平台上，制作、随机、快捷和 AI 自动生成的表情会优先按 QQ 小图表情包样式发送；失败或非 OneBot 平台时自动回退为普通图片。",
+    "type": "bool",
+    "default": true
+  },
   "meme_list_text_template": {
     "description": "表情列表文字模板",
     "hint": "传给 meme-generator 的 render_list 接口。默认前面显示序号，方便统计数量。",

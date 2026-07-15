@@ -293,6 +293,9 @@ class MemePluginConfig:
     def meme_auto_sender_avatar(self) -> bool:
         return bool(self.config.get("meme_auto_sender_avatar", True))
 
+    def meme_send_small_image_enabled(self) -> bool:
+        return bool(self.config.get("meme_send_small_image_enabled", True))
+
     def meme_refresh_verbose_log(self) -> bool:
         return bool(self.config.get("meme_refresh_verbose_log", False))
 

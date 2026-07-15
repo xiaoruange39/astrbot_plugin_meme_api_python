@@ -12,6 +12,13 @@ import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+try:
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+        AiocqhttpMessageEvent,
+    )
+except Exception:  # pragma: no cover - optional platform dependency
+    AiocqhttpMessageEvent = None
+
 from .arg_parser import (
     ArgSyntaxError,
     direction_options_from_text,
@@ -134,6 +141,65 @@ def _image_component(updater, data: bytes, content_type: str) -> Comp.Image:
         logger.warning(f"无法创建临时文件发送图片，降级到 base64: {e}")
         b64 = base64.b64encode(data).decode("ascii")
         return Comp.Image(file=f"base64://{b64}")
+
+
+async def _try_send_small_image_aiocqhttp(
+    updater,
+    event: AstrMessageEvent,
+    data: bytes,
+    *,
+    text: str = "",
+    summary: str = "表情包",
+) -> bool:
+    """Send an image as a OneBot small sticker-like image on aiocqhttp.
+
+    AstrBot's generic Image component is portable, but aiocqhttp/NapCat/Lagrange
+    support a QQ small-image/sticker-like mode through the OneBot image segment's
+    subType fields. Keep this path optional and fall back to the normal
+    event.chain_result image everywhere else.
+    """
+    if not updater.plugin_config.meme_send_small_image_enabled():
+        return False
+    if AiocqhttpMessageEvent is None:
+        return False
+    if event.get_platform_name() != "aiocqhttp" or not isinstance(
+        event, AiocqhttpMessageEvent
+    ):
+        return False
+
+    try:
+        message = []
+        if text.strip():
+            message.append({"type": "text", "data": {"text": text}})
+        b64 = base64.b64encode(data).decode("ascii")
+        message.append(
+            {
+                "type": "image",
+                "data": {
+                    "file": f"base64://{b64}",
+                    # Different OneBot implementations look for different
+                    # spellings, so keep all three like Giftia does.
+                    "subType": 1,
+                    "sub_type": 1,
+                    "subtype": 1,
+                    "summary": summary,
+                },
+            }
+        )
+
+        group_id_value = event.get_group_id()
+        if group_id_value:
+            await event.bot.send_group_msg(
+                group_id=int(group_id_value), message=message
+            )
+        else:
+            await event.bot.send_private_msg(
+                user_id=int(event.get_sender_id()), message=message
+            )
+        return True
+    except Exception as e:
+        logger.warning(f"发送小图表情包失败，降级为普通图片: {e}")
+        return False
 
 
 def _cleanup_temp_images(temp_dir: str, now: float | None = None) -> None:
@@ -848,6 +914,9 @@ async def meme_generate(updater, event: AstrMessageEvent):
             key, images, texts, user_infos, options
         )
         await updater.usage_stats.record(event, info)
+        if await _try_send_small_image_aiocqhttp(updater, event, image):
+            updater._stop_event(event)
+            return
         async for result in _yield_and_stop(
             updater,
             event,
@@ -1095,6 +1164,11 @@ async def _random_meme_results(
                 )
                 await updater.usage_stats.record(event, info)
                 keywords = _format_keywords([str(v) for v in info.get("keywords", [])])
+                if await _try_send_small_image_aiocqhttp(
+                    updater, event, image, text=f"关键词：{keywords}\n"
+                ):
+                    updater._stop_event(event)
+                    return
                 async for result in _yield_and_stop(
                     updater,
                     event,
@@ -1250,6 +1324,9 @@ async def meme_shortcut_listener(updater, event: AstrMessageEvent):
                 logger.debug(f"快捷指令渲染跳过 {key}: {e}")
                 continue
             await updater.usage_stats.record(event, info)
+            if await _try_send_small_image_aiocqhttp(updater, event, image):
+                stop_event(event)
+                return
             yield event.chain_result([_image_component(updater, image, content_type)])
             stop_event(event)
             return
