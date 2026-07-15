@@ -861,7 +861,19 @@ async def meme_info(updater, event: AstrMessageEvent):
                 [Comp.Plain("\n"), _image_component(updater, image, content_type)]
             )
         except Exception as e:
-            logger.warning(f"获取表情预览失败 {info.get('key')}: {e}")
+            base_url = updater.plugin_config.meme_api_base_url()
+            logger.warning(
+                f"表情详情预览图获取失败，已降级为纯文本详情："
+                f"表情={info.get('key')}，meme API={base_url}，原因={e}"
+            )
+            lines.extend(
+                [
+                    "",
+                    f"预览图：获取失败，请检查 meme API 地址、服务或反向代理：{base_url}",
+                ]
+            )
+            yield event.plain_result("\n".join(lines))
+            return
         yield event.chain_result(components)
     except Exception as e:
         yield event.plain_result(f"获取表情详情失败：{e}")

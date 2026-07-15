@@ -39,6 +39,54 @@ class MemeApiClient:
             await self._session.close()
         self._session = None
 
+    def _redirect_message(self, resp: aiohttp.ClientResponse) -> str:
+        location = str(resp.headers.get("Location") or "").strip()
+        target = f" 到 {location}" if location else ""
+        return (
+            f"meme API 返回 HTTP {resp.status} 重定向{target}；"
+            "请检查 meme_api_base_url 或反向代理配置，"
+            "避免把域名请求重定向到 127.0.0.1/localhost"
+        )
+
+    def _as_list(self, value) -> list:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        return [value]
+
+    def _normalize_info(self, key: str, info: dict) -> dict:
+        normalized = dict(info)
+        normalized.setdefault("key", key)
+        normalized["keywords"] = [
+            str(value).strip()
+            for value in self._as_list(normalized.get("keywords"))
+            if str(value).strip()
+        ] or [key]
+        normalized["tags"] = [
+            str(value).strip()
+            for value in self._as_list(normalized.get("tags"))
+            if str(value).strip()
+        ]
+        shortcuts = normalized.get("shortcuts")
+        normalized["shortcuts"] = shortcuts if isinstance(shortcuts, list) else []
+        return normalized
+
+    def _info_has_searchable_detail(self, key: str, info: dict) -> bool:
+        keywords = [str(value).strip() for value in self._as_list(info.get("keywords"))]
+        if any(value and value.lower() != key.lower() for value in keywords):
+            return True
+        for field in ("tags", "shortcuts"):
+            values = self._as_list(info.get(field))
+            if any(str(value).strip() for value in values):
+                return True
+        params = info.get("params")
+        if isinstance(params, dict) and params:
+            return True
+        return any(info.get(field) for field in ("date_created", "date_modified"))
+
     async def _read_limited_response(
         self, resp: aiohttp.ClientResponse, limit: int | None = None
     ) -> bytes:
@@ -65,8 +113,12 @@ class MemeApiClient:
 
         async def request_once(active_session: aiohttp.ClientSession, path: str):
             async with active_session.get(
-                f"{self._base_url_getter()}{path}", timeout=timeout
+                f"{self._base_url_getter()}{path}",
+                timeout=timeout,
+                allow_redirects=False,
             ) as resp:
+                if 300 <= resp.status < 400:
+                    raise RuntimeError(self._redirect_message(resp))
                 data = await self._read_limited_response(resp, MAX_JSON_RESPONSE_BYTES)
                 text = data.decode("utf-8", errors="replace")
                 if resp.status >= 400:
@@ -122,8 +174,13 @@ class MemeApiClient:
                 else:
                     kwargs["json"] = json_body or {}
                 async with session.post(
-                    f"{self._base_url_getter()}{path}", timeout=timeout, **kwargs
+                    f"{self._base_url_getter()}{path}",
+                    timeout=timeout,
+                    allow_redirects=False,
+                    **kwargs,
                 ) as resp:
+                    if 300 <= resp.status < 400:
+                        raise RuntimeError(self._redirect_message(resp))
                     data = await self._read_limited_response(resp)
                     content_type = (
                         resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
@@ -151,8 +208,12 @@ class MemeApiClient:
         for path in paths:
             try:
                 async with session.get(
-                    f"{self._base_url_getter()}{path}", timeout=timeout
+                    f"{self._base_url_getter()}{path}",
+                    timeout=timeout,
+                    allow_redirects=False,
                 ) as resp:
+                    if 300 <= resp.status < 400:
+                        raise RuntimeError(self._redirect_message(resp))
                     data = await self._read_limited_response(resp)
                     content_type = (
                         resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
@@ -178,22 +239,33 @@ class MemeApiClient:
         if not isinstance(payload, list):
             raise RuntimeError("meme API 返回的表情列表格式不正确")
 
+        seed_infos: dict[str, dict] = {}
         if payload and all(isinstance(item, dict) for item in payload):
-            entries = []
+            keys: list[str] = []
+            entries: list[tuple[str, dict]] = []
+            needs_detail_load = False
             for item in payload:
                 key = str(item.get("key") or item.get("meme_key") or "").strip()
                 if not key:
                     logger.warning(f"表情信息缺少 key，跳过: {item}")
                     continue
-                item.setdefault("key", key)
-                item.setdefault("keywords", [key])
-                item.setdefault("shortcuts", [])
-                item.setdefault("tags", [])
-                entries.append((key, item))
-            logger.info(f"meme API 表情信息刷新完成，共获取 {len(entries)} 个详情")
-            return dict(entries)
 
-        keys = payload
+                if not self._info_has_searchable_detail(key, item):
+                    needs_detail_load = True
+
+                info = self._normalize_info(key, item)
+                seed_infos[key] = info
+                keys.append(key)
+                entries.append((key, info))
+
+            if not needs_detail_load:
+                logger.info(f"meme API 表情信息刷新完成，共获取 {len(entries)} 个详情")
+                return dict(entries)
+            logger.info(
+                f"meme API 返回 {len(keys)} 个简略表情信息，继续加载详情以补全关键词"
+            )
+        else:
+            keys = [str(key).strip() for key in payload if str(key).strip()]
 
         total = len(keys)
         verbose_log = self._verbose_log_getter()
@@ -220,22 +292,26 @@ class MemeApiClient:
                     if not isinstance(info, dict):
                         logger.warning(f"{key} 的 info 格式不正确，跳过")
                         return None
-                    info.setdefault("key", key)
-                    info.setdefault("keywords", [key])
-                    info.setdefault("shortcuts", [])
-                    info.setdefault("tags", [])
-                    return key, info
+                    merged_info = {**seed_infos.get(key, {}), **info}
+                    return key, self._normalize_info(key, merged_info)
                 except Exception as e:
+                    seed_info = seed_infos.get(key)
+                    if seed_info:
+                        logger.warning(
+                            f"获取表情信息失败 {key}，使用列表中的简略信息: {e}"
+                        )
+                        return key, seed_info
                     logger.warning(f"获取表情信息失败 {key}: {e}")
                     return None
 
         session = self._ensure_session()
         results = await asyncio.gather(
-            *(load_info(session, i + 1, str(key)) for i, key in enumerate(keys)),
+            *(load_info(session, i + 1, key) for i, key in enumerate(keys)),
             return_exceptions=True,
         )
 
         entries = [r for r in results if r is not None and not isinstance(r, Exception)]
+        logger.info(f"meme API 表情信息刷新完成，共获取 {len(entries)} 个详情")
         return dict(entries)
 
     async def get_preview(self, key: str) -> tuple[bytes, str]:
