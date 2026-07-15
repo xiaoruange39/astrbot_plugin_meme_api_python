@@ -384,50 +384,86 @@ async def get_replied_message_segments(
     Returns:
         A list of segments from the replied message, or empty list.
     """
-    for segment in extract_message_segments(updater, event):
+    message_ids: list[str] = []
+
+    def add_message_id(value: object) -> None:
+        message_id = str(value or "").strip()
+        if message_id and message_id not in message_ids:
+            message_ids.append(message_id)
+
+    def extract_message_id_from_segment(segment: object) -> str:
         if isinstance(segment, dict):
             if segment.get("type") != "reply":
-                continue
+                return ""
             data = segment.get("data") or {}
-            message_id = str(
+            return str(
                 data.get("id") or data.get("message_id") or data.get("msg_id") or ""
             ).strip()
-        else:
-            if hasattr(segment, "chain"):
-                # If segment has its own chain (e.g. Comp.Reply), return its content directly
-                chain = getattr(segment, "chain", [])
-                return list(chain) if hasattr(chain, "__iter__") else [chain]
-            message_id = str(
-                getattr(segment, "id", "")
-                or getattr(segment, "message_id", "")
-                or getattr(segment, "msg_id", "")
-                or getattr(segment, "reply_id", "")
-                or getattr(segment, "target", "")
-                or ""
-            ).strip()
-            if not message_id:
-                data = getattr(segment, "data", None)
-                if isinstance(data, dict):
-                    message_id = str(
-                        data.get("id")
-                        or data.get("message_id")
-                        or data.get("msg_id")
-                        or ""
-                    ).strip()
-            if not message_id and not hasattr(segment, "chain"):
-                continue
+
+        message_id = str(
+            getattr(segment, "id", "")
+            or getattr(segment, "message_id", "")
+            or getattr(segment, "msg_id", "")
+            or getattr(segment, "reply_id", "")
+            or getattr(segment, "target", "")
+            or ""
+        ).strip()
         if not message_id:
-            logger.warning(
-                f"获取引用消息失败：未找到引用消息 ID，segment={type(segment).__name__}"
-            )
-            return []
+            data = getattr(segment, "data", None)
+            if isinstance(data, dict):
+                message_id = str(
+                    data.get("id")
+                    or data.get("message_id")
+                    or data.get("msg_id")
+                    or ""
+                ).strip()
+        return message_id
+
+    for segment in extract_message_segments(updater, event):
+        if not isinstance(segment, dict) and hasattr(segment, "chain"):
+            # AstrBot Comp.Reply may already carry the referenced message chain.
+            # Prefer that local chain because image segments often contain the
+            # downloaded /root/AstrBot/data/temp/... path that the meme renderer
+            # can read without depending on model-side multimodal URLs.
+            chain = getattr(segment, "chain", [])
+            if chain:
+                return list(chain) if hasattr(chain, "__iter__") else [chain]
+        add_message_id(extract_message_id_from_segment(segment))
+
+    raw_event = raw_event_dict_from_event(event)
+    for key in ("reply_id", "reply_message_id"):
+        add_message_id(raw_event.get(key))
+
+    def add_message_ids_from_text(value: object) -> None:
+        if not isinstance(value, str):
+            return
+        for message_id in re.findall(r"\[CQ:reply,id=(-?\d+)\]", value):
+            add_message_id(message_id)
+
+    for source in _event_raw_value_candidates(event):
+        if isinstance(source, dict):
+            for segment in _segments_from_value(source):
+                add_message_id(extract_message_id_from_segment(segment))
+            for key in ("raw_message", "message", "message_text"):
+                add_message_ids_from_text(source.get(key))
+            data = source.get("data")
+            if isinstance(data, dict):
+                for key in ("raw_message", "message", "message_text"):
+                    add_message_ids_from_text(data.get(key))
+        else:
+            add_message_ids_from_text(source)
+
+    for message_id in message_ids:
         try:
             msg = await event.bot.get_msg(message_id=int(message_id))
         except Exception as e:
-            logger.warning(f"获取引用消息失败：message_id={message_id}，{e}")
-            return []
-        segments = msg.get("message", []) if isinstance(msg, dict) else []
-        return segments if isinstance(segments, list) else []
+            logger.warning(
+                f"Failed to fetch replied message: message_id={message_id}, {e}"
+            )
+            continue
+        segments = _segments_from_value(msg)
+        if segments:
+            return segments
     return []
 
 
@@ -515,6 +551,40 @@ def extract_message_image_urls(updater, event: AstrMessageEvent) -> list[str]:
     return extract_image_urls_from_segments(updater, segments)
 
 
+def _segments_from_value(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        message = value.get("message")
+        if isinstance(message, list):
+            return message
+        data = value.get("data")
+        if isinstance(data, dict):
+            message = data.get("message")
+            if isinstance(message, list):
+                return message
+    if value is not None and not isinstance(value, (str, bytes, dict)):
+        try:
+            return list(value)
+        except Exception:
+            pass
+    return []
+
+
+def _event_raw_value_candidates(event: AstrMessageEvent) -> list[object]:
+    message_obj = getattr(event, "message_obj", None)
+    return [
+        getattr(message_obj, "message", None),
+        getattr(message_obj, "raw_message", None),
+        getattr(message_obj, "raw_event", None),
+        getattr(message_obj, "raw", None),
+        getattr(event, "message", None),
+        getattr(event, "raw_message", None),
+        getattr(event, "raw_event", None),
+        getattr(event, "raw", None),
+    ]
+
+
 def extract_segments_from_event(event: AstrMessageEvent) -> list[object]:
     """Helper to retrieve message segments from various event structure candidates.
 
@@ -524,30 +594,30 @@ def extract_segments_from_event(event: AstrMessageEvent) -> list[object]:
     Returns:
         A list of segments.
     """
+    segments: list[object] = []
+    seen: set[tuple[object, ...]] = set()
+
+    def append_unique(items: list[object]) -> None:
+        for item in items:
+            if isinstance(item, dict):
+                key = ("dict", repr(item))
+            else:
+                key = ("object", id(item))
+            if key in seen:
+                continue
+            seen.add(key)
+            segments.append(item)
+
     get_messages = getattr(event, "get_messages", None)
     if callable(get_messages):
         try:
-            messages = get_messages()
-            if isinstance(messages, list):
-                return messages
-            if messages is not None and not isinstance(messages, (str, bytes, dict)):
-                try:
-                    return list(messages)
-                except Exception:
-                    pass
+            append_unique(_segments_from_value(get_messages()))
         except Exception:
             pass
-    message_obj = getattr(event, "message_obj", None)
-    for value in (
-        getattr(message_obj, "message", None),
-        getattr(message_obj, "raw_message", None),
-        getattr(event, "message", None),
-    ):
-        if isinstance(value, list):
-            return value
-        if isinstance(value, dict) and isinstance(value.get("message"), list):
-            return value["message"]
-    return []
+
+    for value in _event_raw_value_candidates(event):
+        append_unique(_segments_from_value(value))
+    return segments
 
 
 def raw_event_dict_from_event(event: AstrMessageEvent) -> dict:
