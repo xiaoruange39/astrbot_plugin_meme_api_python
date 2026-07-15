@@ -1,5 +1,18 @@
 # 更新日志
 
+
+## 0.2.8
+
+- Added an opt-in LLM meme workflow with a plugin configuration switch.
+- Each candidate request samples up to 50 visible, non-blocked templates.
+- The AI receives template keywords, tags, and image/text constraints before rendering.
+
+- Candidate data is now returned only to the Agent instead of being sent to chat.
+- A second candidate request in the same turn is rejected; no match means no meme.
+- Candidate lookup or meme generation failures now stop silently without another LLM reply.
+- A successfully sent LLM meme now stops the source event to prevent duplicate LLM runs and images.
+- AI generation now trims excess images and keeps validation errors internal.
+
 ## 0.2.7
 
 - 新增 `meme_list_render_timeout` 配置项：表情列表图渲染单独使用更长超时（默认 60 秒，且不会小于 `meme_request_timeout`），缓解表情库较大时列表渲染超时。

@@ -279,6 +279,15 @@ class MemePluginConfig:
     def meme_poke_random_enabled(self) -> bool:
         return bool(self.config.get("meme_poke_random_enabled", False))
 
+    def meme_llm_tool_enabled(self) -> bool:
+        return bool(self.config.get("meme_llm_tool_enabled", False))
+
+    def meme_llm_candidate_count(self) -> int:
+        try:
+            return max(1, int(self.config.get("meme_llm_candidate_count", 50)))
+        except (TypeError, ValueError):
+            return 50
+
     def meme_group_whitelist(self) -> list[str]:
         return [
             str(v).strip() for v in self.config.get("meme_group_whitelist", []) if v
@@ -289,6 +298,20 @@ class MemePluginConfig:
 
     def meme_auto_sender_avatar(self) -> bool:
         return bool(self.config.get("meme_auto_sender_avatar", True))
+
+    def meme_send_small_image_enabled(self) -> bool:
+        return bool(self.config.get("meme_send_small_image_enabled", True))
+
+    def meme_small_image_summaries(self) -> list[str]:
+        value = self.config.get("meme_small_image_summaries", ["表情包"])
+        if isinstance(value, str):
+            items = re.split(r"[\s,，]+", value)
+        elif isinstance(value, list):
+            items = value
+        else:
+            items = []
+        summaries = [str(item).strip() for item in items if str(item).strip()]
+        return summaries or ["表情包"]
 
     def meme_refresh_verbose_log(self) -> bool:
         return bool(self.config.get("meme_refresh_verbose_log", False))

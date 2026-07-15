@@ -63,7 +63,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.2.7",
+    "0.2.8",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""
@@ -434,6 +434,80 @@ class MemeUpdater(Star):
 
         async for res in meme_generate(self, event):
             yield res
+
+    @filter.llm_tool(name="meme_get_random_candidates")
+    async def llm_meme_get_random_candidates(
+        self, event: AstrMessageEvent, scene: str
+    ):
+        """Get a random batch of meme templates when a meme may suit the conversation.
+
+        Use this when you are considering a meme as one possible response action.
+        You may also send normal <message> replies in the same turn, but tool use
+        must be a real sibling <tool_call name="meme_get_random_candidates">JSON</tool_call>
+        action, not <tool_code>, default_api.*, or text inside a message. If
+        previous tool_results contain <meme_result final='true'>, do not call meme
+        tools again. After reviewing candidates, either call meme_generate_from_candidate
+        with a real <tool_call> for one suitable meme or continue normally if no meme fits.
+
+        Args:
+            scene(string): A short summary of the current scene, mood, and reply intent
+        """
+        from .src.llm_tools import (
+            MEME_SKIPPED_RESULT,
+            get_random_candidate_batch,
+        )
+
+        try:
+            result = await get_random_candidate_batch(self, event, scene)
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to get meme candidates: {e}", exc_info=True)
+            return MEME_SKIPPED_RESULT
+
+    @filter.llm_tool(name="meme_generate_from_candidate")
+    async def llm_meme_generate_from_candidate(
+        self,
+        event: AstrMessageEvent,
+        meme_name: str,
+        texts: list[str] | None = None,
+        image_urls: list[str] | None = None,
+        user_ids: list[str] | None = None,
+        use_sender_avatar: bool = True,
+    ):
+        """Generate and send one meme selected from meme_get_random_candidates.
+
+        Images in the current or replied-to message are used automatically. Invoke
+        this only through a real sibling <tool_call name="meme_generate_from_candidate">JSON</tool_call>
+        action. Do not write <tool_code>, default_api.*, or Python-like calls; they
+        are plain text and will not execute. The generated meme is sent directly by
+        the tool. After the tool result, decide naturally whether to also send a
+        short text reply, send no extra message, or continue with other non-meme
+        actions. If previous tool_results contain <meme_result final='true'>, do not
+        call this tool again. Do not call this tool twice in the same turn.
+
+        Args:
+            meme_name(string): The key of a template from the candidate batch
+            texts(array[string]): Text items required by the template, or an empty array
+            image_urls(array[string]): Additional image URLs, or an empty array
+            user_ids(array[string]): Numeric user IDs for avatar inputs
+            use_sender_avatar(boolean): Allow sender/bot avatars when images are missing
+        """
+        from .src.llm_tools import (
+            MEME_SKIPPED_RESULT,
+            generate_meme_from_candidate,
+        )
+
+        try:
+            result = await generate_meme_from_candidate(
+                self, event, meme_name, texts, image_urls, user_ids, use_sender_avatar
+            )
+            return result
+        except Exception as e:
+            logger.warning(
+                f"AI meme generation failed: {e}",
+                exc_info=True,
+            )
+            return MEME_SKIPPED_RESULT
 
     @filter.custom_filter(PokeToBotFilter)
     async def meme_poke_random_listener(self, event: AstrMessageEvent):

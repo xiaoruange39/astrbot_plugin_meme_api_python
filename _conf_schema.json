@@ -111,6 +111,18 @@
     "type": "bool",
     "default": false
   },
+  "meme_llm_tool_enabled": {
+    "description": "Enable autonomous LLM meme tools",
+    "hint": "Disabled by default. The AI receives 50 random visible templates per batch and chooses one using the conversation context.",
+    "type": "bool",
+    "default": false
+  },
+  "meme_llm_candidate_count": {
+    "description": "随机提取表情包数量",
+    "hint": "每次带入大模型上下文的随机表情包数量，过多会影响速度和占用大量 Token。",
+    "type": "int",
+    "default": 50
+  },
   "meme_auto_default_texts": {
     "description": "自动使用默认文字",
     "hint": "制作表情时未提供文字则自动使用 meme API 返回的默认文字。",
@@ -122,6 +134,23 @@
     "hint": "制作单头像表情且未提供图片时，自动使用发送者 QQ 头像。",
     "type": "bool",
     "default": true
+  },
+  "meme_send_small_image_enabled": {
+    "description": "生成表情按小图发送",
+    "hint": "开启后，在 aiocqhttp/NapCat/Lagrange 等 OneBot 平台上，制作、随机、快捷和 AI 自动生成的表情会优先按 QQ 小图表情包样式发送；失败或非 OneBot 平台时自动回退为普通图片。",
+    "type": "bool",
+    "default": true
+  },
+  "meme_small_image_summaries": {
+    "description": "表情包外显文字",
+    "hint": "发送小图表情包时的外显文字提示；可填写多个，发送时会随机抽取一个。",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "表情包"
+    ]
   },
   "meme_list_text_template": {
     "description": "表情列表文字模板",
