@@ -444,9 +444,10 @@ class MemeUpdater(Star):
         Use this when you are considering a meme as one possible response action.
         You may also send normal <message> replies in the same turn, but tool use
         must be a real sibling <tool_call name="meme_get_random_candidates">JSON</tool_call>
-        action, not <tool_code>, default_api.*, or text inside a message. After
-        reviewing candidates, either call meme_generate_from_candidate with a real
-        <tool_call> for one suitable meme or continue normally if no meme fits.
+        action, not <tool_code>, default_api.*, or text inside a message. If
+        previous tool_results contain <meme_result final='true'>, do not call meme
+        tools again. After reviewing candidates, either call meme_generate_from_candidate
+        with a real <tool_call> for one suitable meme or continue normally if no meme fits.
 
         Args:
             scene(string): A short summary of the current scene, mood, and reply intent
@@ -481,7 +482,8 @@ class MemeUpdater(Star):
         are plain text and will not execute. The generated meme is sent directly by
         the tool. After the tool result, decide naturally whether to also send a
         short text reply, send no extra message, or continue with other non-meme
-        actions. Do not call this tool twice in the same turn.
+        actions. If previous tool_results contain <meme_result final='true'>, do not
+        call this tool again. Do not call this tool twice in the same turn.
 
         Args:
             meme_name(string): The key of a template from the candidate batch

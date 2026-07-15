@@ -1,5 +1,8 @@
 import json
 import random
+import time
+
+from .image_resolver import raw_event_dict_from_event
 
 from .commands import (
     _fill_default_avatar_images,
@@ -14,12 +17,16 @@ from .commands import (
 
 CANDIDATE_REQUEST_FLAG = "_meme_llm_candidate_batch_requested"
 GENERATION_COMPLETE_FLAG = "_meme_llm_generation_complete"
+GENERATION_LOCKS_ATTR = "_meme_llm_generation_locks"
+GENERATION_LOCK_TTL_SECONDS = 300
 
 
 MEME_SENT_RESULT = (
     "<meme_result status='sent' final='true'>"
     "The meme image has already been sent directly to the user. "
-    "Do not call meme tools again for this turn. You may still decide whether "
+    "A meme has already been generated for this user message. Do not call "
+    "meme_get_random_candidates or meme_generate_from_candidate again in this "
+    "tool loop. You may still decide whether "
     "to send a normal follow-up reply, or send no message, based on the conversation. "
     "If you reply, do not repeat the image or mention internal tool details."
     "</meme_result>"
@@ -34,6 +41,87 @@ MEME_SKIPPED_RESULT = (
 
 def finish_without_meme(event) -> str:
     return MEME_SKIPPED_RESULT
+
+
+def _event_message_id(event) -> str:
+    raw_event = raw_event_dict_from_event(event)
+    message_obj = getattr(event, "message_obj", None)
+    candidates = [
+        raw_event.get("message_id") if isinstance(raw_event, dict) else None,
+        raw_event.get("msg_id") if isinstance(raw_event, dict) else None,
+    ]
+    if isinstance(raw_event, dict):
+        data = raw_event.get("data")
+        if isinstance(data, dict):
+            candidates.extend([data.get("message_id"), data.get("msg_id")])
+    for source in (message_obj, event):
+        candidates.extend(
+            [
+                getattr(source, "message_id", None),
+                getattr(source, "msg_id", None),
+                getattr(source, "id", None),
+            ]
+        )
+    for value in candidates:
+        message_id = str(value or "").strip()
+        if message_id:
+            return message_id
+
+    timestamp = ""
+    if isinstance(raw_event, dict):
+        timestamp = str(
+            raw_event.get("time") or raw_event.get("timestamp") or ""
+        ).strip()
+    if not timestamp:
+        timestamp = str(getattr(message_obj, "timestamp", "") or "").strip()
+    if timestamp:
+        return f"time:{timestamp}"
+    return f"event:{id(event)}"
+
+
+def _generation_lock_key(updater, event) -> str:
+    try:
+        group_id = updater._group_id(event)
+    except Exception:
+        group_id = ""
+    try:
+        sender_id = updater._sender_id(event)
+    except Exception:
+        sender_id = ""
+    return ":".join(
+        [
+            str(group_id or "private"),
+            str(sender_id or "unknown"),
+            _event_message_id(event),
+        ]
+    )
+
+
+def _generation_locks(updater) -> dict[str, float]:
+    locks = getattr(updater, GENERATION_LOCKS_ATTR, None)
+    if not isinstance(locks, dict):
+        locks = {}
+        setattr(updater, GENERATION_LOCKS_ATTR, locks)
+    now = time.monotonic()
+    expired = [
+        key
+        for key, created_at in locks.items()
+        if now - float(created_at or 0) > GENERATION_LOCK_TTL_SECONDS
+    ]
+    for key in expired:
+        locks.pop(key, None)
+    return locks
+
+
+def _is_generation_locked(updater, event) -> bool:
+    return _generation_lock_key(updater, event) in _generation_locks(updater)
+
+
+def _mark_generation_locked(updater, event) -> None:
+    _generation_locks(updater)[_generation_lock_key(updater, event)] = (
+        time.monotonic()
+    )
+
 
 def _as_strings(value, name: str, limit: int) -> list[str]:
     if value is None:
@@ -113,6 +201,10 @@ async def get_random_candidate_batch(updater, event, scene: str) -> str | None:
         return None
     if not updater._is_allowed_group(event):
         return None
+    if getattr(event, GENERATION_COMPLETE_FLAG, False) or _is_generation_locked(
+        updater, event
+    ):
+        return MEME_SENT_RESULT
     if getattr(event, CANDIDATE_REQUEST_FLAG, False):
         return finish_without_meme(event)
     await updater._refresh_meme_infos()
@@ -138,8 +230,10 @@ async def generate_meme_from_candidate(
         return None
     if not updater._is_allowed_group(event):
         return None
-    if getattr(event, GENERATION_COMPLETE_FLAG, False):
-        return finish_without_meme(event)
+    if getattr(event, GENERATION_COMPLETE_FLAG, False) or _is_generation_locked(
+        updater, event
+    ):
+        return MEME_SENT_RESULT
 
     texts = _as_strings(texts, "texts", 20)
     image_urls = [
@@ -204,4 +298,5 @@ async def generate_meme_from_candidate(
         )
     await updater.usage_stats.record(event, info)
     setattr(event, GENERATION_COMPLETE_FLAG, True)
+    _mark_generation_locked(updater, event)
     return MEME_SENT_RESULT
