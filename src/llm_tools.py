@@ -233,13 +233,13 @@ def format_candidate_batch(scene: str, infos: list[dict]) -> str:
             "candidate_count": len(candidates),
             "instruction": (
                 "If a meme would improve the conversation, choose the best candidate "
-                "and call meme_generate_from_candidate using the real XML tool-call "
-                "format: <tool_call name=\"meme_generate_from_candidate\">{...}</tool_call>. "
-                "Never write <tool_code> or Python-like calls; those are plain text and "
-                "will not execute. Use image_urls only for real image URLs/base64/local "
-                "paths, never media hashes; use user_ids for QQ avatars. Messages in the "
-                "same completion may be sent before the tool executes, so wait for the "
-                "tool result if you want a reply after the meme. If tool_results already "
+                "and invoke the real LLM tool meme_generate_from_candidate through the "
+                "current framework's tool-calling mechanism. Do not output pseudo-code, "
+                "code blocks, <tool_code>, default_api.* calls, or any textual imitation "
+                "of a tool call; those are ordinary message text and may not execute. "
+                "Use image_urls only for real image URLs/base64/local paths, never media "
+                "hashes; use user_ids for QQ avatars. Wait for the tool result if you "
+                "want to decide whether to reply after the meme. If tool results already "
                 "contain <meme_result final='true'>, do not call meme tools again. If no "
                 "candidate fits, continue naturally with text or no message as appropriate."
             ),
