@@ -303,7 +303,7 @@ class MemePluginConfig:
         return bool(self.config.get("meme_send_small_image_enabled", True))
 
     def meme_small_image_summaries(self) -> list[str]:
-        value = self.config.get("meme_small_image_summaries", ["表情包"])
+        value = self.config.get("meme_small_image_summaries", ["[动画表情]"])
         if isinstance(value, str):
             items = re.split(r"[\s,，]+", value)
         elif isinstance(value, list):
@@ -311,7 +311,7 @@ class MemePluginConfig:
         else:
             items = []
         summaries = [str(item).strip() for item in items if str(item).strip()]
-        return summaries or ["表情包"]
+        return summaries or ["[动画表情]"]
 
     def meme_refresh_verbose_log(self) -> bool:
         return bool(self.config.get("meme_refresh_verbose_log", False))

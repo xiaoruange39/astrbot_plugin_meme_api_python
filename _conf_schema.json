@@ -149,7 +149,7 @@
       "type": "string"
     },
     "default": [
-      "表情包"
+      "[动画表情]"
     ]
   },
   "meme_list_text_template": {
