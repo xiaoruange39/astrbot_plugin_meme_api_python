@@ -3,6 +3,7 @@ import os
 import platform
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from astrbot.api import logger
 
@@ -13,13 +14,23 @@ except Exception:
 
 
 class MemeImageRenderer:
-    def __init__(self, usage_stats, remove_emoji: Callable[[str], str]):
+    def __init__(
+        self,
+        usage_stats,
+        remove_emoji: Callable[[str], str],
+        custom_font_path: Callable[[], str] | None = None,
+        data_dir: str | None = None,
+    ):
         self.usage_stats = usage_stats
         self.remove_emoji = remove_emoji
+        self._custom_font_path_getter = custom_font_path
+        self._data_dir = data_dir
         self._usage_font_candidates: list[tuple[int, str]] | None = None
         self._usage_font_cache = {}
         self._usage_font_lock = threading.Lock()
         self._usage_font_warned = False
+        self._custom_font_missing_warned = False
+        self._custom_font_load_warned = False
 
     def _font_supports_usage_text(self, font) -> bool:
         try:
@@ -94,6 +105,90 @@ class MemeImageRenderer:
             self._usage_font_candidates = sorted(candidates, key=lambda item: item[0])
             return self._usage_font_candidates
 
+    def _resolve_custom_font_path(self) -> str:
+        """Resolves the configured custom font file, if any.
+
+        Accepts an absolute path, a path relative to the plugin directory, or a
+        bare filename that lives under the plugin/data `fonts` (or
+        `resources/fonts`) directory. Returns an empty string when unset or
+        unresolved.
+        """
+        getter = self._custom_font_path_getter
+        if getter is None:
+            return ''
+        try:
+            raw = str(getter() or '').strip()
+        except Exception:
+            raw = ''
+        if not raw:
+            return ''
+        try:
+            candidate = Path(raw).expanduser()
+        except Exception:
+            candidate = None
+        candidates: list[Path] = []
+        if candidate is not None and candidate.is_absolute():
+            candidates.append(candidate)
+        else:
+            name = Path(raw).name
+            plugin_dir = Path(__file__).resolve().parent.parent
+            search_dirs = [plugin_dir]
+            if self._data_dir:
+                search_dirs.append(Path(self._data_dir))
+            for base in search_dirs:
+                candidates.extend(
+                    [
+                        base / raw,
+                        base / 'fonts' / name,
+                        base / 'resources' / 'fonts' / name,
+                    ]
+                )
+        checked: list[str] = []
+        for item in candidates:
+            try:
+                checked.append(str(item))
+                if item.is_file():
+                    return str(item.resolve())
+            except Exception:
+                continue
+        if not self._custom_font_missing_warned:
+            self._custom_font_missing_warned = True
+            logger.warning(
+                '自定义字体文件不存在，回退到自动字体: '
+                + raw
+                + ' | 已检查: '
+                + ' | '.join(checked)
+            )
+        return ''
+
+    def _load_custom_font(self, size: int):
+        """Loads the user-configured font at the given size, or None."""
+        if ImageFont is None:
+            return None
+        path = self._resolve_custom_font_path()
+        if not path:
+            return None
+        cache_key = ('custom', path, size)
+        with self._usage_font_lock:
+            cached = self._usage_font_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        try:
+            font = ImageFont.truetype(path, size)
+        except Exception as exc:
+            if not self._custom_font_load_warned:
+                self._custom_font_load_warned = True
+                logger.warning(
+                    '自定义字体加载失败，回退到自动字体: '
+                    + path
+                    + ' | '
+                    + str(exc)
+                )
+            return None
+        with self._usage_font_lock:
+            self._usage_font_cache[cache_key] = font
+        return font
+
     def _load_usage_font(self, size: int):
         if ImageFont is None:
             return None
@@ -101,6 +196,9 @@ class MemeImageRenderer:
             cached_font = self._usage_font_cache.get(size)
             if cached_font is not None:
                 return cached_font
+        custom_font = self._load_custom_font(size)
+        if custom_font is not None:
+            return custom_font
         candidates = self._usage_font_candidates_sorted()
         for priority, path in candidates:
             if priority >= 100:

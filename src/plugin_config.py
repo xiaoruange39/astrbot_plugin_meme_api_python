@@ -293,6 +293,9 @@ class MemePluginConfig:
             str(v).strip() for v in self.config.get("meme_group_whitelist", []) if v
         ]
 
+    def meme_custom_font_path(self) -> str:
+        return str(self.config.get('meme_custom_font_path', '') or '').strip()
+
     def meme_auto_default_texts(self) -> bool:
         return bool(self.config.get("meme_auto_default_texts", True))
 

@@ -123,6 +123,12 @@
     "type": "int",
     "default": 50
   },
+  "meme_custom_font_path": {
+    "description": "自定义字体路径",
+    "hint": "统计/列表等图片渲染时使用的字体文件；支持绝对路径，或插件目录/数据目录下 fonts、resources/fonts 中的文件名；留空则自动挑选系统中文字体。",
+    "type": "string",
+    "default": ""
+  },
   "meme_auto_default_texts": {
     "description": "自动使用默认文字",
     "hint": "制作表情时未提供文字则自动使用 meme API 返回的默认文字。",
