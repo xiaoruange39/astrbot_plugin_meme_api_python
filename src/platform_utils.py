@@ -487,6 +487,76 @@ def official_author_fields(event: AstrMessageEvent) -> tuple[str, str]:
     return user_id, name
 
 
+def _official_mention_payload(event: AstrMessageEvent) -> list:
+    """Locates the QQ official message `mentions` list on the event.
+
+    Channel/group @ payloads carry a `mentions` array where each entry is a
+    User object (openid + username). C2C payloads usually omit it.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        The mentions list, or an empty list.
+    """
+    message_obj = getattr(event, 'message_obj', None)
+    for raw in (
+        getattr(message_obj, 'raw_message', None),
+        getattr(message_obj, 'raw_event', None),
+        getattr(event, 'raw_message', None),
+    ):
+        if raw is None:
+            continue
+        mentions = getattr(raw, 'mentions', None)
+        if isinstance(mentions, list) and mentions:
+            return mentions
+        if isinstance(raw, dict):
+            data = raw.get('d') if isinstance(raw.get('d'), dict) else raw
+            if isinstance(data, dict) and isinstance(data.get('mentions'), list):
+                return data['mentions']
+    return []
+
+
+def official_mention_fields(event: AstrMessageEvent) -> list[tuple[str, str]]:
+    """Extracts (openid, username) pairs from a QQ official mentions payload.
+
+    Channel and group @ messages include the mentioned users with their
+    usernames, so a target that was @-ed in the current message can be resolved
+    directly without waiting for that member to speak first.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        A list of (openid, username) tuples; may be empty.
+    """
+    results: list[tuple[str, str]] = []
+    for entry in _official_mention_payload(event):
+        if isinstance(entry, dict):
+            user_id = str(
+                entry.get('member_openid')
+                or entry.get('user_openid')
+                or entry.get('openid')
+                or entry.get('id')
+                or ''
+            ).strip()
+            name = str(entry.get('username') or entry.get('nick') or '').strip()
+        else:
+            user_id = str(
+                getattr(entry, 'member_openid', '')
+                or getattr(entry, 'user_openid', '')
+                or getattr(entry, 'openid', '')
+                or getattr(entry, 'id', '')
+                or ''
+            ).strip()
+            name = str(
+                getattr(entry, 'username', '') or getattr(entry, 'nick', '') or ''
+            ).strip()
+        if user_id or name:
+            results.append((user_id, name))
+    return results
+
+
 def cache_official_author_nick(event: AstrMessageEvent) -> None:
     """Caches the current QQ official message author openid -> nickname.
 
@@ -503,6 +573,9 @@ def cache_official_author_nick(event: AstrMessageEvent) -> None:
     author_id, author_name = official_author_fields(event)
     if author_id and author_name:
         _remember_official_nick(author_id, author_name)
+    for mention_id, mention_name in official_mention_fields(event):
+        if mention_id and mention_name:
+            _remember_official_nick(mention_id, mention_name)
 
 
 def _name_from_me_payload(payload: object) -> str:
@@ -578,6 +651,14 @@ async def official_user_name(event: AstrMessageEvent, user_id: str) -> str:
     author_id, author_name = official_author_fields(event)
     if author_id and author_name:
         _remember_official_nick(author_id, author_name)
+
+    # Channel/group @ payloads carry the mentioned users' names directly, so a
+    # freshly @-ed target resolves without needing to have spoken before.
+    for mention_id, mention_name in official_mention_fields(event):
+        if mention_id and mention_name:
+            _remember_official_nick(mention_id, mention_name)
+        if mention_id == user_id and mention_name:
+            return mention_name
 
     if user_id == sender_id(event):
         try:
@@ -725,6 +806,9 @@ async def sender_user_info(event: AstrMessageEvent) -> dict:
             _remember_official_nick(author_id, author_name)
         if author_name:
             names.append(author_name)
+        for mention_id, mention_name in official_mention_fields(event):
+            if mention_id and mention_name:
+                _remember_official_nick(mention_id, mention_name)
 
     name = next((value for value in names if value and value != sender_id_val), "")
     if not name:
