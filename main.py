@@ -63,7 +63,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.3.0",
+    "0.3.1",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""
@@ -108,7 +108,10 @@ class MemeUpdater(Star):
             self._lookup_group_name,
         )
         self.image_renderer = MemeImageRenderer(
-            self.usage_stats, self.disabled_memes.remove_emoji
+            self.usage_stats,
+            self.disabled_memes.remove_emoji,
+            self.plugin_config.meme_custom_font_path,
+            self._meme_data_dir,
         )
         self.usage_stats.register_web_apis(context, "astrbot_plugin_meme_api_python")
         context.register_web_api(

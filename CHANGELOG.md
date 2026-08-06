@@ -1,6 +1,11 @@
 # 更新日志
 
 
+## 0.3.1
+
+- 新增 `meme_custom_font_path` 配置：可为统计、屏蔽列表等 Pillow 渲染图指定自定义字体，支持绝对路径或插件目录/数据目录下 fonts、resources/fonts 中的文件名；留空保持原有的自动挑选系统中文字体行为。参考 astrbot_plugin_message_stats 的字体设置实现。
+
+
 ## 0.3.0
 
 - 适配 QQ 官方 Bot（`qq_official` / `qq_official_webhook`）获取头像：按机器人 appid + 成员 openid 拼接 `https://q.qlogo.cn/qqapp/<appid>/<openid>/0`。

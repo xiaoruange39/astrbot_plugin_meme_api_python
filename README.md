@@ -84,6 +84,7 @@ mkdir /root/memeapi
 | `meme_auto_sender_avatar` | 图片数量不足时是否自动补当前发送者头像。 |
 | `meme_send_small_image_enabled` | OneBot 平台是否按 QQ 小图表情包样式发送生成结果。 |
 | `meme_small_image_summary_enabled` | 小图表情是否携带外显文字（如 `[动画表情]`）；部分客户端带 summary 时可能发送超时，可关闭。 |
+| `meme_custom_font_path` | 统计/屏蔽列表等 Pillow 渲染图使用的自定义字体；支持绝对路径或插件目录/数据目录下 fonts、resources/fonts 中的文件名，留空自动挑选系统字体。 |
 | `meme_list_text_template` | 表情列表渲染模板，默认 `{index}. {keywords}`。 |
 | `meme_list_sort_by` / `meme_list_sort_reverse` | 表情列表排序方式。 |
 | `remote_enabled` | 是否使用远程服务器执行更新和重启。 |
