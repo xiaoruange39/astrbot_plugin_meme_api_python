@@ -487,6 +487,24 @@ def official_author_fields(event: AstrMessageEvent) -> tuple[str, str]:
     return user_id, name
 
 
+def cache_official_author_nick(event: AstrMessageEvent) -> None:
+    """Caches the current QQ official message author openid -> nickname.
+
+    QQ official bots only expose a member nickname at d.author.username on the
+    message that member sends, and there is no API to look one up by openid.
+    Caching for every observed official message lets later mention references
+    reuse a nickname the member revealed while speaking.
+
+    Args:
+        event: The AstrMessageEvent.
+    """
+    if not is_official_platform(event):
+        return
+    author_id, author_name = official_author_fields(event)
+    if author_id and author_name:
+        _remember_official_nick(author_id, author_name)
+
+
 def _name_from_me_payload(payload: object) -> str:
     """Extracts a display name from a botpy `api.me()` payload.
 
@@ -582,6 +600,31 @@ async def official_user_name(event: AstrMessageEvent, user_id: str) -> str:
         return cached
 
     return ""
+
+
+async def resolve_display_name(event: AstrMessageEvent, user_id: str) -> str:
+    """Resolves a user-facing display name, with a platform-aware fallback.
+
+    On aiocqhttp the user_id is a QQ number and is fine to show verbatim. On QQ
+    official bots the user_id is a 32-char openid that would look like garbage in
+    a rendered meme, so an unresolved official name falls back to empty instead.
+
+    Args:
+        event: The AstrMessageEvent.
+        user_id: The platform-specific user ID.
+
+    Returns:
+        The resolved display name, or a safe fallback string.
+    """
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return ""
+    name = await lookup_sender_name(event, user_id)
+    if name:
+        return name
+    if is_official_platform(event):
+        return ""
+    return user_id
 
 
 async def lookup_sender_name(event: AstrMessageEvent, user_id: str) -> str:
