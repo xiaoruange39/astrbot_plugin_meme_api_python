@@ -302,6 +302,9 @@ class MemePluginConfig:
     def meme_send_small_image_enabled(self) -> bool:
         return bool(self.config.get("meme_send_small_image_enabled", True))
 
+    def meme_small_image_summary_enabled(self) -> bool:
+        return bool(self.config.get("meme_small_image_summary_enabled", True))
+
     def meme_small_image_summaries(self) -> list[str]:
         value = self.config.get("meme_small_image_summaries", ["[动画表情]"])
         if isinstance(value, str):

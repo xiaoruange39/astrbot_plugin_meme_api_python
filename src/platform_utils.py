@@ -1,3 +1,4 @@
+import re
 from urllib.parse import quote
 
 from astrbot.api import logger
@@ -6,6 +7,9 @@ from astrbot.api.event import AstrMessageEvent
 from .image_resolver import extract_segments_from_event, raw_event_dict_from_event
 
 QQ_AVATAR_URL_TEMPLATE = "https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
+QQ_OFFICIAL_AVATAR_URL_TEMPLATE = "https://q.qlogo.cn/qqapp/{appid}/{user_id}/0"
+OFFICIAL_PLATFORMS = {"qq_official", "qq_official_webhook"}
+OFFICIAL_MENTION_RE = re.compile(r"<@!?([0-9A-Za-z]{6,})>")
 
 
 def avatar_url(user_id: str) -> str:
@@ -20,6 +24,111 @@ def avatar_url(user_id: str) -> str:
     if not user_id:
         return ""
     return QQ_AVATAR_URL_TEMPLATE.format(user_id=quote(str(user_id), safe=""))
+
+
+def platform_name(event: AstrMessageEvent) -> str:
+    """Returns the normalized (lowercase) platform name for the event.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        The platform name string, or empty string.
+    """
+    get_platform_name = getattr(event, "get_platform_name", None)
+    if callable(get_platform_name):
+        try:
+            name = str(get_platform_name() or "").strip().lower()
+            if name:
+                return name
+        except Exception:
+            pass
+    meta = getattr(event, "platform_meta", None)
+    return str(getattr(meta, "name", "") or "").strip().lower()
+
+
+def is_official_platform(event: AstrMessageEvent) -> bool:
+    """Checks whether the event originates from a QQ official bot platform.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        True for qq_official/qq_official_webhook, False otherwise.
+    """
+    return platform_name(event) in OFFICIAL_PLATFORMS
+
+
+def platform_client(event: AstrMessageEvent) -> object:
+    """Returns the underlying platform client/bot instance for the event.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        The client/bot object, or None.
+    """
+    return getattr(event, "client", None) or getattr(event, "bot", None)
+
+
+def official_bot_appid(event: AstrMessageEvent) -> str:
+    """Resolves the QQ official bot appid required to build avatar URLs.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        The appid string, or empty string.
+    """
+    client = platform_client(event)
+    platform = getattr(client, "platform", None)
+    for source in (platform, client, getattr(event, "platform_meta", None)):
+        appid = getattr(source, "appid", None)
+        if appid:
+            return str(appid).strip()
+    return ""
+
+
+def official_avatar_url(event: AstrMessageEvent, user_id: str) -> str:
+    """Builds a QQ official bot avatar URL for a member openid.
+
+    Args:
+        event: The AstrMessageEvent.
+        user_id: The member openid.
+
+    Returns:
+        The avatar URL string, or empty string when appid is unavailable.
+    """
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return ""
+    appid = official_bot_appid(event)
+    if not appid:
+        logger.warning("QQ 官方 Bot appid 不可用，无法获取头像")
+        return ""
+    return QQ_OFFICIAL_AVATAR_URL_TEMPLATE.format(
+        appid=quote(appid, safe=""), user_id=quote(user_id, safe="")
+    )
+
+
+def resolve_avatar_url(event: AstrMessageEvent, user_id: str) -> str:
+    """Resolves an avatar URL for a user across supported platforms.
+
+    Args:
+        event: The AstrMessageEvent.
+        user_id: The platform-specific user ID (QQ number or official openid).
+
+    Returns:
+        The avatar URL string, or empty string when it cannot be resolved.
+    """
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return ""
+    if is_official_platform(event):
+        return official_avatar_url(event, user_id)
+    if user_id.isdigit():
+        return avatar_url(user_id)
+    return ""
 
 
 def sender_id(event: AstrMessageEvent) -> str:
@@ -56,7 +165,7 @@ def sender_avatar_url(event: AstrMessageEvent) -> str:
     Returns:
         The avatar URL string.
     """
-    return avatar_url(sender_id(event))
+    return resolve_avatar_url(event, sender_id(event))
 
 
 def bot_id(event: AstrMessageEvent) -> str:
@@ -73,9 +182,18 @@ def bot_id(event: AstrMessageEvent) -> str:
     bot_id_val = str(raw_event.get("self_id") or raw_event.get("bot_id") or "").strip()
     if bot_id_val:
         return bot_id_val
-    return str(
+    bot_id_val = str(
         getattr(event, "self_id", "") or getattr(message_obj, "self_id", "") or ""
     ).strip()
+    if bot_id_val:
+        return bot_id_val
+    get_self_id = getattr(event, "get_self_id", None)
+    if callable(get_self_id):
+        try:
+            return str(get_self_id() or "").strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def bot_avatar_url(event: AstrMessageEvent) -> str:
@@ -87,7 +205,7 @@ def bot_avatar_url(event: AstrMessageEvent) -> str:
     Returns:
         The avatar URL string.
     """
-    return avatar_url(bot_id(event))
+    return resolve_avatar_url(event, bot_id(event))
 
 
 def group_id(event: AstrMessageEvent) -> str:
@@ -284,6 +402,90 @@ async def call_bot_action_candidates(
     return results
 
 
+def _name_from_me_payload(payload: object) -> str:
+    """Extracts a display name from a botpy `api.me()` payload.
+
+    Args:
+        payload: The dict/object returned by `api.me()`.
+
+    Returns:
+        The username string, or empty string.
+    """
+    if isinstance(payload, dict):
+        for key in ("username", "nickname", "name"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+    for attr in ("username", "nickname", "name"):
+        value = str(getattr(payload, attr, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+async def official_me_info(event: AstrMessageEvent) -> dict:
+    """Fetches the bot's own user info via the QQ official `api.me()` endpoint.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        A dict with at least "id"/"username" when available, else empty dict.
+    """
+    client = platform_client(event)
+    api = getattr(client, "api", None)
+    me = getattr(api, "me", None)
+    if not callable(me):
+        return {}
+    try:
+        result = await me()
+    except Exception as e:
+        logger.debug(f"QQ 官方 Bot api.me() 获取当前用户失败: {e}")
+        return {}
+    if isinstance(result, dict):
+        return result
+    return {
+        "id": str(getattr(result, "id", "") or ""),
+        "username": str(getattr(result, "username", "") or ""),
+        "avatar": str(getattr(result, "avatar", "") or ""),
+    }
+
+
+async def official_user_name(event: AstrMessageEvent, user_id: str) -> str:
+    """Resolves a display name for a QQ official bot user (best effort).
+
+    The sender's own nickname is carried on the event, and the bot's own name
+    is available through `api.me()`. Arbitrary member openids generally cannot be
+    resolved on group/C2C sessions, so this returns "" in that case.
+
+    Args:
+        event: The AstrMessageEvent.
+        user_id: The member openid.
+
+    Returns:
+        The resolved display name string, or empty string.
+    """
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return ""
+
+    if user_id == sender_id(event):
+        try:
+            name = str(event.get_sender_name() or "").strip()
+        except Exception:
+            name = ""
+        if name and name != user_id:
+            return name
+
+    if user_id == bot_id(event):
+        name = _name_from_me_payload(await official_me_info(event))
+        if name:
+            return name
+
+    return ""
+
+
 async def lookup_sender_name(event: AstrMessageEvent, user_id: str) -> str:
     """Looks up a user's display name inside a group or globally.
 
@@ -294,8 +496,12 @@ async def lookup_sender_name(event: AstrMessageEvent, user_id: str) -> str:
     Returns:
         The resolved display name string.
     """
+    if not user_id:
+        return ""
+    if is_official_platform(event):
+        return await official_user_name(event, user_id)
     bot = getattr(event, "bot", None)
-    if not bot or not user_id:
+    if not bot:
         return ""
     group_id_val = group_id(event)
     query_user_id = int(user_id) if user_id.isdigit() else user_id
@@ -377,7 +583,7 @@ async def sender_user_info(event: AstrMessageEvent) -> dict:
     return {"name": name or sender_id_val, "gender": "unknown"}
 
 
-def bot_user_info(event: AstrMessageEvent) -> dict:
+async def bot_user_info(event: AstrMessageEvent) -> dict:
     """Resolves bot user info details.
 
     Args:
@@ -387,7 +593,10 @@ def bot_user_info(event: AstrMessageEvent) -> dict:
         A dictionary containing "name" and "gender".
     """
     bot_id_val = bot_id(event)
-    return {"name": bot_id_val or "机器人", "gender": "unknown"}
+    name = ""
+    if is_official_platform(event):
+        name = _name_from_me_payload(await official_me_info(event))
+    return {"name": name or bot_id_val or "机器人", "gender": "unknown"}
 
 
 async def try_send_forward_message(

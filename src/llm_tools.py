@@ -4,6 +4,7 @@ import re
 import time
 
 from .image_resolver import raw_event_dict_from_event
+from .platform_utils import is_official_platform
 
 from .commands import (
     _fill_default_avatar_images,
@@ -326,7 +327,11 @@ async def generate_meme_from_candidate(
         if _valid_image_locator(value)
     ]
     user_ids = _as_strings(user_ids, "user_ids", 10)
-    if any(not user_id.isdigit() for user_id in user_ids):
+    # QQ official bots identify members by alphanumeric openid instead of a
+    # numeric QQ number, so only enforce the digit rule off official platforms.
+    if not is_official_platform(event) and any(
+        not user_id.isdigit() for user_id in user_ids
+    ):
         raise ValueError("user_ids may only contain numeric user IDs.")
 
     await updater._refresh_meme_infos()

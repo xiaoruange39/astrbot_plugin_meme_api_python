@@ -2,9 +2,11 @@ name: astrbot_plugin_meme_api_python
 display_name: 表情包制作插件api版
 author: "xiaoruange39"
 description: 调用 meme-generator API，提供表情列表、详情、随机表情和制作表情能力。
-version: 0.2.8
+version: 0.3.0
 repo: "https://github.com/xiaoruange39/astrbot_plugin_meme_api_python"
 
 
 support_platforms:
   - aiocqhttp
+  - qq_official
+  - qq_official_webhook
