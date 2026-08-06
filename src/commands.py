@@ -42,6 +42,7 @@ from .platform_utils import (
     is_official_platform,
     lookup_sender_name,
     resolve_avatar_url,
+    resolve_display_name,
     sender_avatar_url,
     sender_id,
     sender_user_info,
@@ -1011,7 +1012,7 @@ async def _resolve_generate_args(
                 avatar_urls.append(avatar)
                 avatar_user_infos.append(
                     {
-                        "name": await lookup_sender_name(event, user_id) or user_id,
+                        "name": await resolve_display_name(event, user_id),
                         "gender": "unknown",
                     }
                 )
@@ -1025,7 +1026,7 @@ async def _resolve_generate_args(
         avatar_urls.append(avatar)
         avatar_user_infos.append(
             {
-                "name": await lookup_sender_name(event, user_id) or user_id,
+                "name": await resolve_display_name(event, user_id),
                 "gender": "unknown",
             }
         )
@@ -1256,6 +1257,10 @@ async def meme_poke_random_listener(updater, event: AstrMessageEvent):
         updater: The MemeUpdater instance.
         event: The AstrMessageEvent.
     """
+    from .platform_utils import cache_official_author_nick
+
+    cache_official_author_nick(event)
+
     if (
         not updater.plugin_config.meme_poke_random_enabled()
         or not updater._is_allowed_group(event)
@@ -1272,7 +1277,13 @@ async def meme_shortcut_listener(updater, event: AstrMessageEvent):
         updater: The MemeUpdater instance.
         event: The AstrMessageEvent.
     """
-    from .platform_utils import extract_message_text, stop_event
+    from .platform_utils import (
+        cache_official_author_nick,
+        extract_message_text,
+        stop_event,
+    )
+
+    cache_official_author_nick(event)
 
     if not updater._is_allowed_group(event):
         return

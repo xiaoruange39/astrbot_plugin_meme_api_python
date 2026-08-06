@@ -9,7 +9,7 @@
 - `support_platforms` 增加 `qq_official` 与 `qq_official_webhook`。
 - 新增 `meme_small_image_summary_enabled` 开关：可关闭小图表情包的外显文字（summary）。部分客户端（如 NapCat）在带 summary 时发送 GIF 表情会 `invoke timeout`，关闭后可规避。
 - 适配 QQ 官方 Bot 昵称：发送者昵称取自消息事件的 `d.author.username`（群消息有值，私聊为空），机器人自身昵称通过 `api.me()` 获取。官方 Bot 无法按 openid 查询任意成员昵称，故按 openid→昵称缓存已发言成员，后续 @ 该成员时复用缓存。
-
+- 修复已发言成员仍无法获取昵称的问题：插件现在会在每条官方 Bot 消息上缓存 openid→昵称（包括快捷、戳一戳监听），后续 @ 该成员时即可复用；从未发言的成员仍无法解析（平台未提供按 openid 查询昵称的接口），此时以空名字回退，不再把 32 位 openid 直接当作名字渲染。
 
 ## 0.2.8
 
