@@ -8,7 +8,7 @@
 - `@` 用户、AI 工具 `user_ids` 在官方 Bot 下支持字母数字 openid；官方 Bot 的 `<@openid>` @ 消息会被识别为头像素材。
 - `support_platforms` 增加 `qq_official` 与 `qq_official_webhook`。
 - 新增 `meme_small_image_summary_enabled` 开关：可关闭小图表情包的外显文字（summary）。部分客户端（如 NapCat）在带 summary 时发送 GIF 表情会 `invoke timeout`，关闭后可规避。
-- 适配 QQ 官方 Bot 昵称：发送者昵称取自事件（`get_sender_name`），机器人自身昵称通过 `api.me()` 获取；群/C2C 无法查询任意成员昵称时留空。
+- 适配 QQ 官方 Bot 昵称：发送者昵称取自消息事件的 `d.author.username`（群消息有值，私聊为空），机器人自身昵称通过 `api.me()` 获取。官方 Bot 无法按 openid 查询任意成员昵称，故按 openid→昵称缓存已发言成员，后续 @ 该成员时复用缓存。
 
 
 ## 0.2.8

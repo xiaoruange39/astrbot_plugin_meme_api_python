@@ -10,6 +10,11 @@ QQ_AVATAR_URL_TEMPLATE = "https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=
 QQ_OFFICIAL_AVATAR_URL_TEMPLATE = "https://q.qlogo.cn/qqapp/{appid}/{user_id}/0"
 OFFICIAL_PLATFORMS = {"qq_official", "qq_official_webhook"}
 OFFICIAL_MENTION_RE = re.compile(r"<@!?([0-9A-Za-z]{6,})>")
+# QQ official bots only expose a member's nickname on the message they send
+# (d.author.username). There is no API to look up an arbitrary member openid,
+# so cache openid -> username as members speak and reuse it later for @ targets.
+_OFFICIAL_NICK_CACHE: dict[str, str] = {}
+_OFFICIAL_NICK_CACHE_MAX = 2000
 
 
 def avatar_url(user_id: str) -> str:
@@ -402,6 +407,86 @@ async def call_bot_action_candidates(
     return results
 
 
+def _remember_official_nick(user_id: str, name: str) -> None:
+    """Caches a QQ official member's openid -> nickname mapping.
+
+    Args:
+        user_id: The member openid.
+        name: The resolved nickname.
+    """
+    user_id = str(user_id or "").strip()
+    name = str(name or "").strip()
+    if not user_id or not name or user_id == name:
+        return
+    # Refresh recency by reinserting; bound the cache size (FIFO eviction).
+    if user_id in _OFFICIAL_NICK_CACHE:
+        _OFFICIAL_NICK_CACHE.pop(user_id, None)
+    elif len(_OFFICIAL_NICK_CACHE) >= _OFFICIAL_NICK_CACHE_MAX:
+        _OFFICIAL_NICK_CACHE.pop(next(iter(_OFFICIAL_NICK_CACHE)), None)
+    _OFFICIAL_NICK_CACHE[user_id] = name
+
+
+def _official_author_payload(event: AstrMessageEvent) -> object:
+    """Locates the QQ official message author object/dict on the event.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        The author object/dict, or None.
+    """
+    message_obj = getattr(event, "message_obj", None)
+    for raw in (
+        getattr(message_obj, "raw_message", None),
+        getattr(message_obj, "raw_event", None),
+        getattr(event, "raw_message", None),
+    ):
+        if raw is None:
+            continue
+        author = getattr(raw, "author", None)
+        if author is not None:
+            return author
+        if isinstance(raw, dict):
+            data = raw.get("d") if isinstance(raw.get("d"), dict) else raw
+            if isinstance(data, dict) and isinstance(data.get("author"), dict):
+                return data["author"]
+    return None
+
+
+def official_author_fields(event: AstrMessageEvent) -> tuple[str, str]:
+    """Extracts (openid, username) for the current QQ official message author.
+
+    The nickname is carried at `d.author.username` and is only populated for
+    group messages (empty in C2C/private per QQ), matching the platform docs.
+
+    Args:
+        event: The AstrMessageEvent.
+
+    Returns:
+        A tuple of (openid, username); either value may be empty.
+    """
+    author = _official_author_payload(event)
+    if author is None:
+        return "", ""
+    if isinstance(author, dict):
+        user_id = str(
+            author.get("member_openid")
+            or author.get("user_openid")
+            or author.get("id")
+            or ""
+        ).strip()
+        name = str(author.get("username") or "").strip()
+        return user_id, name
+    user_id = str(
+        getattr(author, "member_openid", "")
+        or getattr(author, "user_openid", "")
+        or getattr(author, "id", "")
+        or ""
+    ).strip()
+    name = str(getattr(author, "username", "") or "").strip()
+    return user_id, name
+
+
 def _name_from_me_payload(payload: object) -> str:
     """Extracts a display name from a botpy `api.me()` payload.
 
@@ -455,9 +540,10 @@ async def official_me_info(event: AstrMessageEvent) -> dict:
 async def official_user_name(event: AstrMessageEvent, user_id: str) -> str:
     """Resolves a display name for a QQ official bot user (best effort).
 
-    The sender's own nickname is carried on the event, and the bot's own name
-    is available through `api.me()`. Arbitrary member openids generally cannot be
-    resolved on group/C2C sessions, so this returns "" in that case.
+    QQ official bots only expose a member nickname at `d.author.username` on the
+    message that member sends (group messages only; empty for C2C/private). There
+    is no API to look up an arbitrary member openid, so we cache nicknames as
+    members speak and reuse them. The bot's own name comes from `api.me()`.
 
     Args:
         event: The AstrMessageEvent.
@@ -470,18 +556,30 @@ async def official_user_name(event: AstrMessageEvent, user_id: str) -> str:
     if not user_id:
         return ""
 
+    # Record the current author's nickname so later @ references can reuse it.
+    author_id, author_name = official_author_fields(event)
+    if author_id and author_name:
+        _remember_official_nick(author_id, author_name)
+
     if user_id == sender_id(event):
         try:
             name = str(event.get_sender_name() or "").strip()
         except Exception:
             name = ""
+        if not name and author_id == user_id:
+            name = author_name
         if name and name != user_id:
+            _remember_official_nick(user_id, name)
             return name
 
     if user_id == bot_id(event):
         name = _name_from_me_payload(await official_me_info(event))
         if name:
             return name
+
+    cached = _OFFICIAL_NICK_CACHE.get(user_id)
+    if cached:
+        return cached
 
     return ""
 
@@ -576,6 +674,14 @@ async def sender_user_info(event: AstrMessageEvent) -> dict:
             names.append(value)
     except Exception:
         pass
+
+    # QQ official bots carry the sender nickname at d.author.username.
+    if is_official_platform(event):
+        author_id, author_name = official_author_fields(event)
+        if author_id and author_name:
+            _remember_official_nick(author_id, author_name)
+        if author_name:
+            names.append(author_name)
 
     name = next((value for value in names if value and value != sender_id_val), "")
     if not name:
