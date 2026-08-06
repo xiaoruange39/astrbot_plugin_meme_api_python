@@ -1,6 +1,11 @@
 # 更新日志
 
 
+## 0.3.2
+
+- QQ 官方 Bot 现在优先从消息的 `mentions` 载荷直接读取被 @ 用户的昵称（频道/群聊 @ 消息会携带 openid + username），即使对方未发过言也能解析；同时缓存这些昵称供后续复用。私聊（C2C）仍因平台不提供 username 而回退到缓存/空名字。
+
+
 ## 0.3.1
 
 - 新增 `meme_custom_font_path` 配置：可为统计、屏蔽列表等 Pillow 渲染图指定自定义字体，支持绝对路径或插件目录/数据目录下 fonts、resources/fonts 中的文件名；留空保持原有的自动挑选系统中文字体行为。参考 astrbot_plugin_message_stats 的字体设置实现。
