@@ -63,7 +63,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.2.8",
+    "0.3.0",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""

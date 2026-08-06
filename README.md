@@ -82,6 +82,8 @@ mkdir /root/memeapi
 | `meme_llm_tool_enabled` | 是否启用 AI 自主表情包工具；开启后模型可按上下文决定是否制作表情包、是否继续文字回复，同一条触发消息最多生成一次。 |
 | `meme_auto_default_texts` | 未提供文字时是否使用 meme API 返回的默认文字。 |
 | `meme_auto_sender_avatar` | 图片数量不足时是否自动补当前发送者头像。 |
+| `meme_send_small_image_enabled` | OneBot 平台是否按 QQ 小图表情包样式发送生成结果。 |
+| `meme_small_image_summary_enabled` | 小图表情是否携带外显文字（如 `[动画表情]`）；部分客户端带 summary 时可能发送超时，可关闭。 |
 | `meme_list_text_template` | 表情列表渲染模板，默认 `{index}. {keywords}`。 |
 | `meme_list_sort_by` / `meme_list_sort_reverse` | 表情列表排序方式。 |
 | `remote_enabled` | 是否使用远程服务器执行更新和重启。 |
@@ -167,7 +169,7 @@ Plugin Page 入口中也可以切换到“屏蔽列表”，查看全局屏蔽�
 
 - 当前消息中的图片或表情图片。
 - 引用消息中的图片或表情图片。
-- `@用户`、`@自己` 或手写 `@QQ号` 自动取 QQ 头像。
+- `@用户`、`@自己` 或手写 `@QQ号` 自动取头像。aiocqhttp（QQ）按 QQ 号取头像，QQ 官方 Bot（`qq_official` / `qq_official_webhook`）按 appid + 成员 openid 取头像。
 - 直接填写 `http://` / `https://` 图片地址。
 
 外部图片下载会校验地址并受 `meme_max_image_mb` 限制，超过大小或无法访问时会生成失败。
@@ -194,7 +196,7 @@ Plugin Page 入口中也可以切换到“屏蔽列表”，查看全局屏蔽�
 
 ### @ 用户头像没有传入
 
-请使用平台原生 @，不要只手打昵称。手动传 QQ 号时可写 `@123456789`。
+请使用平台原生 @，不要只手打昵称。手动传 QQ 号时可写 `@123456789`。QQ 官方 Bot 用成员 openid，@ 消息会解析为 `<@openid>`，需要机器人 appid 才能拼出头像地址。
 
 ### 搜索结果没有用合并消息显示
 

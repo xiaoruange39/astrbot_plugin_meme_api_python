@@ -141,6 +141,12 @@
     "type": "bool",
     "default": true
   },
+  "meme_small_image_summary_enabled": {
+    "description": "小图表情显示外显文字",
+    "hint": "开启后小图表情包携带外显文字（如 [动画表情]）；关闭后不再携带 summary。部分客户端（如 NapCat）带 summary 的表情可能发送超时，可尝试关闭。",
+    "type": "bool",
+    "default": true
+  },
   "meme_small_image_summaries": {
     "description": "表情包外显文字",
     "hint": "发送小图表情包时的外显文字提示；可填写多个，发送时会随机抽取一个。",
@@ -149,7 +155,7 @@
       "type": "string"
     },
     "default": [
-      "表情包"
+      "[动画表情]"
     ]
   },
   "meme_list_text_template": {

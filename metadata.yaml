@@ -9,7 +9,9 @@ tags:
   - Python
   - 表情包
 category: 娱乐
-version: 0.2.9
+version: 0.3.0
 repo: "https://github.com/xiaoruange39/astrbot_plugin_meme_api_python"
 support_platforms:
   - aiocqhttp
+  - qq_official
+  - qq_official_webhook

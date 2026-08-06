@@ -1,6 +1,16 @@
 # 更新日志
 
 
+## 0.3.0
+
+- 适配 QQ 官方 Bot（`qq_official` / `qq_official_webhook`）获取头像：按机器人 appid + 成员 openid 拼接 `https://q.qlogo.cn/qqapp/<appid>/<openid>/0`。
+- 头像解析改为按平台区分：aiocqhttp 仍按 QQ 号取头像，官方 Bot 按 openid 取头像，无法解析时跳过而不再强行拼 QQ 头像地址。
+- `@` 用户、AI 工具 `user_ids` 在官方 Bot 下支持字母数字 openid；官方 Bot 的 `<@openid>` @ 消息会被识别为头像素材。
+- `support_platforms` 增加 `qq_official` 与 `qq_official_webhook`。
+- 新增 `meme_small_image_summary_enabled` 开关：可关闭小图表情包的外显文字（summary）。部分客户端（如 NapCat）在带 summary 时发送 GIF 表情会 `invoke timeout`，关闭后可规避。
+- 适配 QQ 官方 Bot 昵称：发送者昵称取自事件（`get_sender_name`），机器人自身昵称通过 `api.me()` 获取；群/C2C 无法查询任意成员昵称时留空。
+
+
 ## 0.2.8
 
 - 新增可选的 AI 自主表情包流程，可通过 `meme_llm_tool_enabled` 配置项启用。

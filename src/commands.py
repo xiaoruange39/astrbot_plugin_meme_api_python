@@ -35,11 +35,13 @@ from .image_resolver import (
     get_replied_message_segments,
 )
 from .platform_utils import (
-    avatar_url,
+    OFFICIAL_MENTION_RE,
     bot_avatar_url,
     bot_user_info,
     group_id,
+    is_official_platform,
     lookup_sender_name,
+    resolve_avatar_url,
     sender_avatar_url,
     sender_id,
     sender_user_info,
@@ -186,24 +188,27 @@ async def _try_send_small_image_aiocqhttp(
         message = []
         if text.strip():
             message.append({"type": "text", "data": {"text": text}})
-        summary_text = summary
-        if summary_text is None:
-            summary_text = random.choice(
-                updater.plugin_config.meme_small_image_summaries()
-            )
         b64 = base64.b64encode(data).decode("ascii")
+        image_data = {
+            "file": f"base64://{b64}",
+            # Different OneBot implementations look for different
+            # spellings, so keep all common variants.
+            "subType": 1,
+            "sub_type": 1,
+            "subtype": 1,
+        }
+        # Outbound "summary" text (e.g. [动画表情]) is optional and can be disabled.
+        if updater.plugin_config.meme_small_image_summary_enabled():
+            summary_text = summary
+            if summary_text is None:
+                summary_text = random.choice(
+                    updater.plugin_config.meme_small_image_summaries()
+                )
+            image_data["summary"] = summary_text
         message.append(
             {
                 "type": "image",
-                "data": {
-                    "file": f"base64://{b64}",
-                    # Different OneBot implementations look for different
-                    # spellings, so keep all common variants.
-                    "subType": 1,
-                    "sub_type": 1,
-                    "subtype": 1,
-                    "summary": summary_text,
-                },
+                "data": image_data,
             }
         )
 
@@ -983,6 +988,8 @@ async def _resolve_generate_args(
         r"^\[At:\d+\]$",
         r"^@[^\s@/\(]+\(\d{5,}\)$",
         r"^@[^\s@/]+/\d{5,}$",
+        # QQ official bot inline mention token, e.g. <@openid> / <@!openid>.
+        r"^<@!?[0-9A-Za-z]{6,}>$",
     )
     for arg in tokens:
         if any(re.fullmatch(pattern, arg) for pattern in mention_patterns):
@@ -997,20 +1004,25 @@ async def _resolve_generate_args(
             image_urls.append(arg)
             user_infos.append({})
             continue
-        if arg.startswith("@") and arg[1:].isdigit():
+        if arg.startswith("@") and len(arg) > 1:
             user_id = arg[1:]
-            avatar_urls.append(avatar_url(user_id))
-            avatar_user_infos.append(
-                {
-                    "name": await lookup_sender_name(event, user_id) or user_id,
-                    "gender": "unknown",
-                }
-            )
-            continue
+            avatar = resolve_avatar_url(event, user_id)
+            if avatar and (user_id.isdigit() or is_official_platform(event)):
+                avatar_urls.append(avatar)
+                avatar_user_infos.append(
+                    {
+                        "name": await lookup_sender_name(event, user_id) or user_id,
+                        "gender": "unknown",
+                    }
+                )
+                continue
         texts.append(arg)
     at_ids = _extract_message_at_ids(updater, event)
     for user_id in at_ids:
-        avatar_urls.append(avatar_url(user_id))
+        avatar = resolve_avatar_url(event, user_id)
+        if not avatar:
+            continue
+        avatar_urls.append(avatar)
         avatar_user_infos.append(
             {
                 "name": await lookup_sender_name(event, user_id) or user_id,
@@ -1071,6 +1083,11 @@ def _extract_message_at_ids(updater, event: AstrMessageEvent) -> list[str]:
         for qq in re.findall(pattern, text):
             if qq not in user_ids:
                 user_ids.append(qq)
+    # QQ official bot mentions appear as <@!openid> / <@openid> in text.
+    if is_official_platform(event):
+        for openid in OFFICIAL_MENTION_RE.findall(text):
+            if openid and openid not in user_ids:
+                user_ids.append(openid)
     sender_id_val = sender_id(event)
     if sender_id_val and sender_id_val not in user_ids and text.startswith(("@", "＠")):
         user_ids.insert(0, sender_id_val)
@@ -1143,7 +1160,7 @@ async def _fill_default_avatar_images(
     bot_avatar = bot_avatar_url(event)
     fill_items = []
     if target_count >= 2 and bot_avatar:
-        fill_items.append((bot_avatar, bot_user_info(event)))
+        fill_items.append((bot_avatar, await bot_user_info(event)))
     if sender_avatar:
         fill_items.append((sender_avatar, await sender_user_info(event)))
     if not fill_items:
