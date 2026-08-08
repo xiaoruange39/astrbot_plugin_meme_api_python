@@ -1281,13 +1281,17 @@ async def meme_shortcut_listener(updater, event: AstrMessageEvent):
         cache_official_author_nick,
         extract_message_text,
         stop_event,
+        strip_leading_mentions,
     )
 
     cache_official_author_nick(event)
 
     if not updater._is_allowed_group(event):
         return
-    content = extract_message_text(updater, event)
+    # An @ of another member stays inline in the text on QQ official bots, so
+    # match shortcuts against the text with those tokens removed. The @ target is
+    # still read from the untouched message by _extract_message_at_ids.
+    content = strip_leading_mentions(extract_message_text(updater, event))
     if content in {"随机表情", "随机meme", "随机 meme", "来个表情", "来张表情"}:
         async for result in _random_meme_results(updater, event, ""):
             yield result
