@@ -10,6 +10,16 @@ QQ_AVATAR_URL_TEMPLATE = "https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=
 QQ_OFFICIAL_AVATAR_URL_TEMPLATE = "https://q.qlogo.cn/qqapp/{appid}/{user_id}/0"
 OFFICIAL_PLATFORMS = {"qq_official", "qq_official_webhook"}
 OFFICIAL_MENTION_RE = re.compile(r"<@!?([0-9A-Za-z]{6,})>")
+# QQ official bots deliver an @ of another member as an inline `<@openid>` token
+# inside the plain text: the adapter only strips the bot's *own* mention ids
+# (`mentions[i].is_you`). aiocqhttp instead emits a separate At segment, so its
+# text is already clean. Leaving the token in front of the text stops shortcut
+# keywords ("摸", "亲"…) from matching, which reads as the bot ignoring the
+# message. Strip leading mention tokens before keyword matching; the @ target is
+# still recovered separately from the raw text/segments for avatar lookup.
+LEADING_MENTION_RE = re.compile(
+    r"^(?:(?:<@!?[0-9A-Za-z]{6,}>|\[CQ:at,qq=\d+\]|\[At:\d+\])\s*)+"
+)
 # QQ official bots only expose a member's nickname on the message they send
 # (d.author.username). There is no API to look up an arbitrary member openid,
 # so cache openid -> username as members speak and reuse it later for @ targets.
@@ -1034,6 +1044,25 @@ def extract_message_text(updater, event: AstrMessageEvent) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def strip_leading_mentions(text: str) -> str:
+    """Removes leading @ tokens that platforms keep inline in the message text.
+
+    QQ official bots only strip the bot's own ``<@openid>`` mention, so an @ of
+    another member stays at the front of the plain text and would otherwise stop
+    keyword/shortcut matching. Mention ids are still recovered elsewhere from the
+    untouched text, so dropping them here only affects trigger matching.
+
+    Args:
+        text: The raw message text.
+
+    Returns:
+        The text with leading mention tokens removed.
+    """
+    if not text:
+        return ""
+    return LEADING_MENTION_RE.sub("", text).strip()
 
 
 def stop_event(event: AstrMessageEvent) -> None:
