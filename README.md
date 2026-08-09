@@ -10,7 +10,7 @@
 ## 前置要求（如果不用更新功能，直接填meme-generator API即可使用）
 
 1. 已部署并能访问 meme-generator API，默认地址为 `http://127.0.0.1:2233`。
-2. `更新表情包` 和 `重启memeapi` 依赖 Docker 部署的 meme-generator，插件会在更新后执行 `docker restart <容器名>` 重启容器。
+2. `表情更新` / `meme更新` 和 `重启memeapi` 依赖 Docker 部署的 meme-generator，插件会在更新后执行 `docker restart <容器名>` 重启容器。
 3. 如果使用本地更新模式，AstrBot 运行环境需要能执行 `git` 和 `docker restart <容器名>`。
 4. 如果使用远程更新模式，AstrBot 运行环境需要能通过 `ssh` 登录远程服务器。
 5. QQ 头像和 QQ 图片下载依赖外网访问，网络不通时会影响自动补头像或引用图片生成。
@@ -53,7 +53,7 @@ docker run -d \
 mkdir /root/memeapi
 ```
 
-### 3、向bot发送`更新表情包`指令
+### 3、向bot发送`表情更新`或`meme更新`指令
 
 等待更新完成即可
 
@@ -94,7 +94,8 @@ mkdir /root/memeapi
 
 ### 更新和状态
 
-- `更新表情包`：拉取所有配置仓库，更新完成后重启 meme-generator，并刷新表情信息。（管理员指令）
+- `meme帮助` / `表情帮助`：查看本插件指令帮助菜单，优先发送图片；图片生成失败时回退为聊天记录或普通文字。
+- `表情更新` / `meme更新`：拉取所有配置仓库，更新完成后重启 meme-generator，并刷新表情信息。（管理员指令）
 - `重启memeapi`：只重启 meme-generator 容器。（管理员指令）
 - `表情包状态`：查看仓库安装状态和 meme API 加载状态。（管理员指令）
 - `刷新表情信息`：重新从 meme API 拉取表情元数据。（管理员指令）
@@ -177,7 +178,7 @@ Plugin Page 入口中也可以切换到“屏蔽列表”，查看全局屏蔽�
 
 ## 远程更新模式
 
-开启 `remote_enabled` 后，`更新表情包` 和 `重启memeapi` 会通过 SSH 到远程服务器执行。请确认：
+开启 `remote_enabled` 后，`表情更新` / `meme更新` 和 `重启memeapi` 会通过 SSH 到远程服务器执行。请确认：
 
 - `remote_host`、`remote_user`、`remote_port` 填写正确。
 - `remote_workdir` 是远程 memeapi 根目录。

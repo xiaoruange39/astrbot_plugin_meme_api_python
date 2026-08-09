@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import mimetypes
 import os
 import random
@@ -66,6 +67,73 @@ LOUVRE_MODE_MAPPING = {
     "线稿彩色": 7,
 }
 MIRAGETANK_KEY = "miragetank"
+MEME_HELP_RENDER_VERSION = "relaxed-list-v1"
+MEME_HELP_SECTIONS = [
+    (
+        "更新和状态",
+        [
+            "meme帮助 / 表情帮助：查看本插件指令帮助菜单",
+            "表情更新 / meme更新：拉取仓库、重启 memeapi 并刷新表情信息",
+            "重启memeapi：只重启 meme-generator 容器",
+            "表情包状态：查看仓库安装状态和 API 加载状态",
+            "刷新表情信息：重新从 meme API 拉取表情元数据",
+        ],
+    ),
+    (
+        "查找表情",
+        [
+            "表情列表：生成当前可用表情列表图片",
+            "表情详情 <表情名/关键词>：查看参数、关键词和预览图",
+            "meme搜索 <关键词>：按 key、关键词、标签和快捷句式搜索",
+        ],
+    ),
+    (
+        "制作表情",
+        [
+            "制作表情：<表情名/关键词> [文字/@自己/@QQ号/图片URL...]",
+            "随机表情：[文字/@自己/@QQ号/图片URL...]",
+            "快捷指令：可直接发送 meme API 返回的关键词或快捷句式",
+            "可选参数：#左 / #右 / #上 / #下 等模板支持的方向参数",
+        ],
+    ),
+    (
+        "统计和屏蔽",
+        [
+            "表情统计：查看当前群组或私聊全局的调用统计",
+            "总表情统计：查看所有群组汇总调用统计",
+            "屏蔽表情 / 取消屏蔽表情：<表情名/关键词/key>",
+            "全局屏蔽表情 / 取消全局屏蔽表情：<表情名/关键词/key>",
+            "屏蔽表情列表：查看当前群或全局屏蔽列表",
+            "全局屏蔽表情列表：查看全局屏蔽列表",
+        ],
+    ),
+]
+
+
+def _format_meme_help_text() -> str:
+    lines = ["meme 帮助菜单"]
+    for title, commands in MEME_HELP_SECTIONS:
+        lines.extend(["", f"【{title}】", *commands])
+    return "\n".join(lines)
+
+
+def _meme_help_cache_key() -> str:
+    payload = f"{MEME_HELP_RENDER_VERSION}\n{_format_meme_help_text()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _render_cached_meme_help(updater) -> tuple[bytes, str]:
+    cache_key = _meme_help_cache_key()
+    cached = getattr(updater, "_meme_help_image_cache", None)
+    if cached and cached.get("key") == cache_key:
+        return cached["image"], cached["content_type"]
+    image, content_type = updater.image_renderer.render_meme_help(MEME_HELP_SECTIONS)
+    updater._meme_help_image_cache = {
+        "key": cache_key,
+        "image": image,
+        "content_type": content_type,
+    }
+    return image, content_type
 
 
 def _format_range(min_value: int, max_value: int) -> str:
@@ -395,7 +463,7 @@ async def update_memes(updater, event: AstrMessageEvent):
     try:
         if not updater.plugin_config.repo_update_enabled():
             yield event.plain_result(
-                "更新表情包功能未启用，请先在配置项 repo_update_enabled 中开启。"
+                "表情更新功能未启用，请先在配置项 repo_update_enabled 中开启。"
             )
             return
 
@@ -489,8 +557,37 @@ async def update_memes(updater, event: AstrMessageEvent):
 
         yield event.plain_result("\n".join(summary_lines))
     except Exception as e:
-        logger.exception("更新表情包失败")
-        yield event.plain_result(f"更新表情包失败：{e}")
+        logger.exception("表情更新失败")
+        yield event.plain_result(f"表情更新失败：{e}")
+    finally:
+        updater._stop_event(event)
+
+
+async def meme_help(updater, event: AstrMessageEvent):
+    """Shows the meme command help menu."""
+    if not updater._is_allowed_group(event):
+        return
+    try:
+        try:
+            image, content_type = await asyncio.to_thread(
+                _render_cached_meme_help, updater
+            )
+            yield event.chain_result([_image_component(updater, image, content_type)])
+            return
+        except Exception as e:
+            logger.warning(f"渲染 meme 帮助菜单图片失败，降级为文本帮助: {e}")
+        help_text = _format_meme_help_text()
+        if await try_send_forward_message(
+            event,
+            "meme 帮助菜单",
+            help_text,
+            sum(len(lines) for _, lines in MEME_HELP_SECTIONS),
+            prompt="meme 帮助菜单",
+            summary="查看 meme 指令帮助",
+            source="meme帮助",
+        ):
+            return
+        yield event.plain_result(help_text)
     finally:
         updater._stop_event(event)
 

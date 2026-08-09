@@ -843,7 +843,14 @@ async def bot_user_info(event: AstrMessageEvent) -> dict:
 
 
 async def try_send_forward_message(
-    event: AstrMessageEvent, title: str, content: str, count: int
+    event: AstrMessageEvent,
+    title: str,
+    content: str,
+    count: int,
+    *,
+    prompt: str = "表情搜索结果",
+    summary: str | None = None,
+    source: str = "meme搜索",
 ) -> bool:
     """Tries delivering a forward message list to group or private chat.
 
@@ -866,9 +873,9 @@ async def try_send_forward_message(
         {"type": "node", "data": {"name": title, "uin": bot_id_val, "content": content}}
     ]
     metadata = {
-        "prompt": "表情搜索结果",
-        "summary": f"查看 {count} 条搜索结果",
-        "source": "meme搜索",
+        "prompt": prompt,
+        "summary": summary or f"查看 {count} 条搜索结果",
+        "source": source,
     }
     if group_id_val:
         target = int(group_id_val) if group_id_val.isdigit() else group_id_val

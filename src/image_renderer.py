@@ -559,3 +559,186 @@ class MemeImageRenderer:
         output = io.BytesIO()
         image.convert("RGB").save(output, format="PNG")
         return output.getvalue(), "image/png"
+
+    def render_meme_help(
+        self, sections: list[tuple[str, list[str]]], title: str = "meme 帮助菜单"
+    ) -> tuple[bytes, str]:
+        if Image is None or ImageDraw is None:
+            raise RuntimeError("Pillow 不可用")
+        scale = 2
+        width = 1080 * scale
+        margin_x, top_h, bottom = 58 * scale, 176 * scale, 58 * scale
+        card_w = width - margin_x * 2
+        section_gap = 26 * scale
+        card_padding_x, card_padding_y = 30 * scale, 26 * scale
+        command_col_w = 310 * scale
+        row_gap = 14 * scale
+        section_title_font = self._load_usage_font(26 * scale)
+        command_font = self._load_usage_font(20 * scale)
+        desc_font = self._load_usage_font(18 * scale)
+        title_font = self._load_usage_font(42 * scale)
+        subtitle_font = self._load_usage_font(20 * scale)
+
+        def split_help_line(line: str) -> tuple[str, str]:
+            if "：" in line:
+                left, right = line.split("：", 1)
+                return left.strip(), right.strip()
+            return line.strip(), ""
+
+        def wrap_text(text: str, font, max_width: int) -> list[str]:
+            if not text:
+                return []
+            lines: list[str] = []
+            current = ""
+            for char in text:
+                candidate = current + char
+                if self._text_size(measure_draw, candidate, font)[0] <= max_width:
+                    current = candidate
+                    continue
+                if current:
+                    lines.append(current)
+                current = char
+            if current:
+                lines.append(current)
+            return lines
+
+        measure_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        desc_w = card_w - card_padding_x * 2 - command_col_w - 24 * scale
+        section_layouts = []
+        for section_title, lines in sections:
+            rows = []
+            for line in lines:
+                command, desc = split_help_line(self.remove_emoji(line))
+                desc_lines = wrap_text(desc, desc_font, desc_w)
+                row_lines = max(1, len(desc_lines))
+                row_h = max(34 * scale, row_lines * 25 * scale) + 8 * scale
+                rows.append((command, desc_lines, row_h))
+            card_h = (
+                card_padding_y * 2
+                + 34 * scale
+                + 22 * scale
+                + sum(row[2] for row in rows)
+                + row_gap * max(0, len(rows) - 1)
+            )
+            section_layouts.append((section_title, rows, card_h))
+        height = (
+            top_h
+            + sum(card_h for _, _, card_h in section_layouts)
+            + section_gap * max(0, len(section_layouts) - 1)
+            + bottom
+        )
+        image = self._vertical_gradient(
+            width, height, (248, 251, 255), (239, 245, 252)
+        ).convert("RGBA")
+        self._draw_soft_circle(
+            image, (130 * scale, 80 * scale), 220 * scale, (145, 190, 255, 70)
+        )
+        self._draw_soft_circle(
+            image, (width - 120 * scale, 130 * scale), 260 * scale, (255, 176, 211, 62)
+        )
+        self._draw_soft_circle(
+            image, (width // 2, height + 20 * scale), 340 * scale, (176, 224, 210, 52)
+        )
+        draw = ImageDraw.Draw(image)
+        title_box = draw.textbbox((0, 0), title, font=title_font)
+        draw.text(
+            ((width - (title_box[2] - title_box[0])) // 2, 42 * scale),
+            title,
+            font=title_font,
+            fill="#14213d",
+        )
+        command_count = sum(len(lines) for _, lines in sections)
+        subtitle = f"常用指令 · {command_count} 项"
+        subtitle_w, _ = self._text_size(draw, subtitle, subtitle_font)
+        pill_box = (
+            (width - subtitle_w - 52 * scale) // 2,
+            103 * scale,
+            (width + subtitle_w + 52 * scale) // 2,
+            143 * scale,
+        )
+        draw.rounded_rectangle(
+            pill_box,
+            radius=20 * scale,
+            fill=(255, 255, 255, 178),
+            outline=(255, 255, 255, 230),
+            width=scale,
+        )
+        self._draw_centered_text(draw, pill_box, subtitle, subtitle_font, "#52677d")
+        shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        y = top_h
+        for _, _, card_h in section_layouts:
+            shadow_draw.rounded_rectangle(
+                (
+                    margin_x + 3 * scale,
+                    y + 5 * scale,
+                    margin_x + card_w + 3 * scale,
+                    y + card_h + 5 * scale,
+                ),
+                radius=18 * scale,
+                fill=(48, 72, 102, 18),
+            )
+            y += card_h + section_gap
+        image.alpha_composite(shadow)
+        accents = ["#5b8def", "#16a085", "#f59e0b", "#ef4444"]
+        y = top_h
+        for section_index, (section_title, rows, card_h) in enumerate(section_layouts):
+            x = margin_x
+            accent = accents[section_index % len(accents)]
+            draw.rounded_rectangle(
+                (x, y, x + card_w, y + card_h),
+                radius=18 * scale,
+                fill=(255, 255, 255, 224),
+                outline=(226, 235, 246, 245),
+                width=scale,
+            )
+            draw.rounded_rectangle(
+                (x + 18 * scale, y + 22 * scale, x + 24 * scale, y + card_h - 22 * scale),
+                radius=3 * scale,
+                fill=accent,
+            )
+            draw.text(
+                (x + card_padding_x, y + card_padding_y),
+                section_title,
+                font=section_title_font,
+                fill="#14213d",
+            )
+            line_y = y + card_padding_y + 56 * scale
+            for row_index, (command, desc_lines, row_h) in enumerate(rows):
+                if row_index:
+                    draw.line(
+                        (
+                            x + card_padding_x,
+                            line_y - row_gap // 2,
+                            x + card_w - card_padding_x,
+                            line_y - row_gap // 2,
+                        ),
+                        fill="#e7eef7",
+                        width=scale,
+                    )
+                command_box = (
+                    x + card_padding_x,
+                    line_y,
+                    x + card_padding_x + command_col_w - 18 * scale,
+                    line_y + 34 * scale,
+                )
+                draw.rounded_rectangle(command_box, radius=9 * scale, fill="#eef5ff")
+                self._draw_usage_text(
+                    draw,
+                    (command_box[0] + 14 * scale, line_y + 6 * scale),
+                    command,
+                    command_font,
+                    "#245aa8",
+                    command_col_w - 46 * scale,
+                )
+                desc_x = x + card_padding_x + command_col_w + 6 * scale
+                if desc_lines:
+                    desc_y = line_y + 4 * scale
+                    for desc_line in desc_lines:
+                        draw.text((desc_x, desc_y), desc_line, font=desc_font, fill="#52677d")
+                        desc_y += 25 * scale
+                line_y += row_h + row_gap
+            y += card_h + section_gap
+        output = io.BytesIO()
+        image.convert("RGB").save(output, format="PNG")
+        return output.getvalue(), "image/png"

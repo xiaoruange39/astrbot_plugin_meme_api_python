@@ -63,7 +63,7 @@ class PokeToBotFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.3.3",
+    "0.3.4",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""
@@ -81,6 +81,7 @@ class MemeUpdater(Star):
         self._meme_shortcuts: list[dict] = []
         self._shortcut_index: dict[str, list[dict]] = {}
         self._shortcut_wildcards: list[dict] = []
+        self._meme_help_image_cache: dict | None = None
         self._meme_info_lock = asyncio.Lock()
         self._meme_info_refresh_task: asyncio.Task | None = None
         self._meme_data_dir = str(StarTools.get_data_dir() / "memeapi")
@@ -319,11 +320,33 @@ class MemeUpdater(Star):
             yield res
 
     @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("更新表情包")
+    @filter.command("表情更新")
     async def update_memes(self, event: AstrMessageEvent):
-        from .src.commands import update_memes
+        from .src.commands import update_memes as update_memes_command
 
-        async for res in update_memes(self, event):
+        async for res in update_memes_command(self, event):
+            yield res
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("meme更新")
+    async def update_memes_alias(self, event: AstrMessageEvent):
+        from .src.commands import update_memes as update_memes_command
+
+        async for res in update_memes_command(self, event):
+            yield res
+
+    @filter.command("meme帮助")
+    async def meme_help(self, event: AstrMessageEvent):
+        from .src.commands import meme_help as meme_help_command
+
+        async for res in meme_help_command(self, event):
+            yield res
+
+    @filter.command("表情帮助")
+    async def meme_help_alias(self, event: AstrMessageEvent):
+        from .src.commands import meme_help as meme_help_command
+
+        async for res in meme_help_command(self, event):
             yield res
 
     @filter.permission_type(PermissionType.ADMIN)
