@@ -8,7 +8,7 @@ import aiohttp
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import EventMessageType, PermissionType
+from astrbot.api.event.filter import EventMessageType
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config import AstrBotConfig as CoreAstrBotConfig
 from astrbot.core.star.filter.custom_filter import CustomFilter
@@ -59,11 +59,135 @@ class PokeToBotFilter(CustomFilter):
         return is_poke_to_bot_event(event)
 
 
+def _string_values(value: object) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, (str, int, float)):
+        text = str(value).strip()
+        return {text} if text else set()
+    if isinstance(value, dict):
+        values: set[str] = set()
+        for item in value.values():
+            values.update(_string_values(item))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values: set[str] = set()
+        for item in value:
+            values.update(_string_values(item))
+        return values
+    return set()
+
+
+def _mapping_value(source: object, key: str) -> object:
+    if isinstance(source, dict):
+        return source.get(key)
+    getter = getattr(source, "get", None)
+    if callable(getter):
+        try:
+            return getter(key)
+        except Exception:
+            pass
+    return getattr(source, key, None)
+
+
+def _sender_id_from_event(event: AstrMessageEvent) -> str:
+    from .src.platform_utils import sender_id
+
+    return sender_id(event)
+
+
+def _group_id_from_event(event: AstrMessageEvent) -> str:
+    from .src.platform_utils import group_id
+
+    return group_id(event)
+
+
+def _raw_event_from_event(event: AstrMessageEvent) -> dict:
+    from .src.image_resolver import raw_event_dict_from_event
+
+    return raw_event_dict_from_event(event)
+
+
+def _is_astrbot_admin(event: AstrMessageEvent, cfg: CoreAstrBotConfig) -> bool:
+    checker = getattr(event, "is_admin", None)
+    if callable(checker):
+        try:
+            if bool(checker()):
+                return True
+        except Exception:
+            pass
+
+    sender_id = _sender_id_from_event(event)
+    if not sender_id:
+        return False
+    admin_keys = (
+        "admins_id",
+        "admin_ids",
+        "admins",
+        "admin_users",
+        "superusers",
+        "superuser",
+        "super_user",
+    )
+    for key in admin_keys:
+        if sender_id in _string_values(_mapping_value(cfg, key)):
+            return True
+    return False
+
+
+def _role_values(value: object) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, dict):
+        values: set[str] = set()
+        for key, item in value.items():
+            if str(key).lower() in {"role", "member_role", "group_role", "permission"}:
+                values.update(_string_values(item))
+            else:
+                values.update(_role_values(item))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values: set[str] = set()
+        for item in value:
+            values.update(_role_values(item))
+        return values
+    roles: set[str] = set()
+    for attr in ("role", "member_role", "group_role", "permission"):
+        roles.update(_string_values(getattr(value, attr, None)))
+    return roles
+
+
+def _is_group_admin(event: AstrMessageEvent) -> bool:
+    if not _group_id_from_event(event):
+        return False
+    raw_event = _raw_event_from_event(event)
+    raw_data = raw_event.get("data") if isinstance(raw_event.get("data"), dict) else {}
+    role_sources = [
+        getattr(getattr(event, "message_obj", None), "sender", None),
+        getattr(event, "sender", None),
+        raw_event.get("sender"),
+        raw_data.get("sender") if isinstance(raw_data, dict) else None,
+        raw_event.get("author"),
+        raw_data.get("author") if isinstance(raw_data, dict) else None,
+    ]
+    roles: set[str] = set()
+    for source in role_sources:
+        roles.update(_role_values(source))
+    return any(role.lower() in {"owner", "admin", "administrator"} for role in roles)
+
+
+class AdminOrGroupAdminFilter(CustomFilter):
+    """Filter that allows AstrBot admins and group admins."""
+
+    def filter(self, event: AstrMessageEvent, cfg: CoreAstrBotConfig) -> bool:
+        return _is_astrbot_admin(event, cfg) or _is_group_admin(event)
+
+
 @register(
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.3.4",
+    "0.3.5",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""
@@ -311,7 +435,7 @@ class MemeUpdater(Star):
 
     # Command implementation stubs
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("重启memeapi")
     async def restart_memeapi(self, event: AstrMessageEvent):
         from .src.commands import restart_memeapi
@@ -319,7 +443,7 @@ class MemeUpdater(Star):
         async for res in restart_memeapi(self, event):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("表情更新")
     async def update_memes(self, event: AstrMessageEvent):
         from .src.commands import update_memes as update_memes_command
@@ -327,7 +451,7 @@ class MemeUpdater(Star):
         async for res in update_memes_command(self, event):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("meme更新")
     async def update_memes_alias(self, event: AstrMessageEvent):
         from .src.commands import update_memes as update_memes_command
@@ -349,7 +473,7 @@ class MemeUpdater(Star):
         async for res in meme_help_command(self, event):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("表情包状态")
     async def meme_status(self, event: AstrMessageEvent):
         from .src.commands import meme_status
@@ -357,7 +481,7 @@ class MemeUpdater(Star):
         async for res in meme_status(self, event):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("刷新表情信息")
     async def refresh_meme_infos(self, event: AstrMessageEvent):
         from .src.commands import refresh_meme_infos
@@ -365,7 +489,7 @@ class MemeUpdater(Star):
         async for res in refresh_meme_infos(self, event):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("屏蔽表情")
     async def disable_meme(self, event: AstrMessageEvent):
         from .src.commands import set_meme_disabled
@@ -373,7 +497,7 @@ class MemeUpdater(Star):
         async for res in set_meme_disabled(self, event, "屏蔽表情"):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("取消屏蔽表情")
     async def enable_meme(self, event: AstrMessageEvent):
         from .src.commands import unset_meme_disabled
@@ -381,7 +505,7 @@ class MemeUpdater(Star):
         async for res in unset_meme_disabled(self, event, "取消屏蔽表情"):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("全局屏蔽表情")
     async def disable_meme_globally(self, event: AstrMessageEvent):
         from .src.commands import set_meme_disabled
@@ -391,7 +515,7 @@ class MemeUpdater(Star):
         ):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("取消全局屏蔽表情")
     async def enable_meme_globally(self, event: AstrMessageEvent):
         from .src.commands import unset_meme_disabled
@@ -401,7 +525,7 @@ class MemeUpdater(Star):
         ):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("屏蔽表情列表")
     async def list_disabled_memes(self, event: AstrMessageEvent):
         from .src.commands import list_disabled_memes
@@ -411,7 +535,7 @@ class MemeUpdater(Star):
         async for res in list_disabled_memes(self, event, group_id):
             yield res
 
-    @filter.permission_type(PermissionType.ADMIN)
+    @filter.custom_filter(AdminOrGroupAdminFilter)
     @filter.command("全局屏蔽表情列表")
     async def list_global_disabled_memes(self, event: AstrMessageEvent):
         from .src.commands import list_disabled_memes
