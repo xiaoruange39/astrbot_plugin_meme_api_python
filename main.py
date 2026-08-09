@@ -465,13 +465,10 @@ class MemeUpdater(Star):
     async def llm_meme_get_random_candidates(
         self, event: AstrMessageEvent, scene: str
     ):
-        """随机抽取一批当前会话可用的表情包模板，供模型按上下文选择。
-
-        适用于模型想判断「要不要做一张表情包」的场景。返回内容只供模型使用，
-        不会直接发到聊天。同一条触发消息已经生成过表情包时，工具会直接返回已处理结果。
+        """随机获取当前会话可用的表情包候选，不会直接发送。
 
         Args:
-            scene(string): 当前场景、语气和想表达效果的简短描述
+            scene(string): 场景和想表达的效果
         """
         from .src.llm_tools import (
             MEME_SKIPPED_RESULT,
@@ -489,15 +486,11 @@ class MemeUpdater(Star):
     async def llm_meme_search_candidates(
         self, event: AstrMessageEvent, query: str, scene: str = ""
     ):
-        """模糊搜索当前会话可用的表情包模板，搜不到时不制作也不发送。
-
-        适用于模型已经知道想找的表情方向、关键词或梗名时。模糊搜索会复用
-        meme搜索 的匹配规则，并自动排除当前群不可见或已屏蔽的模板。
-        找到候选后，模型可再选择一个模板生成表情包；没有候选时工具会直接返回跳过结果。
+        """按关键词搜索当前会话可用的表情包候选。
 
         Args:
-            query(string): 要模糊搜索的表情关键词、模板 key、标签或快捷句式
-            scene(string): 当前场景、语气和想表达效果的简短描述
+            query(string): 关键词、模板 key、标签或快捷句式
+            scene(string): 场景和想表达的效果
         """
         from .src.llm_tools import (
             MEME_SKIPPED_RESULT,
@@ -521,18 +514,14 @@ class MemeUpdater(Star):
         user_ids: list[str] | None = None,
         use_sender_avatar: bool = True,
     ):
-        """根据候选模板生成并直接发送一张表情包。
-
-        当前消息和引用消息里的图片会自动作为素材使用；也可额外传入图片 URL
-        或 QQ 号头像素材。表情包发出后，模型仍可自行决定是否再补一条文字回复。
-        同一条触发消息最多只会生成一次表情包。
+        """用候选模板生成并直接发送一张表情包。
 
         Args:
-            meme_name(string): 候选批次中的模板 key
-            texts(array[string]): 模板需要的文字，没有则传空数组
-            image_urls(array[string]): 额外图片 URL，没有则传空数组；不要传媒体哈希
-            user_ids(array[string]): 用作头像素材的 QQ 号数组
-            use_sender_avatar(boolean): 图片不足时是否允许自动补发送者/机器人头像
+            meme_name(string): 模板 key
+            texts(array[string]): 文字参数，没有则空数组
+            image_urls(array[string]): 额外图片 URL，没有则空数组
+            user_ids(array[string]): 头像素材 QQ 号
+            use_sender_avatar(boolean): 图片不足时是否补头像
         """
         from .src.llm_tools import (
             MEME_SKIPPED_RESULT,
