@@ -438,6 +438,16 @@ async def _render_list(
     )
 
 
+def _maintenance_reply_lines(lines: list[str]) -> list[str]:
+    """Keep operation feedback while hiding raw command diagnostics."""
+    return [
+        line
+        for line in lines
+        if not line.startswith("    ")
+        or line.lstrip().startswith(("📁 ", "请先确认", "请确认"))
+    ]
+
+
 async def restart_memeapi(updater, event: AstrMessageEvent):
     """Restarts the memeapi server backend.
 
@@ -446,12 +456,14 @@ async def restart_memeapi(updater, event: AstrMessageEvent):
         event: The AstrMessageEvent.
     """
     try:
-        logger.info("正在重启 memeapi 服务...")
+        yield event.plain_result("正在重启 memeapi 服务，请稍候...")
         result = await updater.repo_manager.restart_memeapi()
         log = logger.info if result["success"] else logger.error
         log("\n".join(result["lines"]))
+        yield event.plain_result("\n".join(_maintenance_reply_lines(result["lines"])))
     except Exception:
         logger.exception("重启 memeapi 服务失败")
+        yield event.plain_result("重启 memeapi 服务失败。")
     finally:
         updater._stop_event(event)
 
@@ -465,12 +477,12 @@ async def update_memes(updater, event: AstrMessageEvent):
     """
     try:
         if not updater.plugin_config.repo_update_enabled():
-            logger.warning(
+            yield event.plain_result(
                 "表情更新功能未启用，请先在配置项 repo_update_enabled 中开启。"
             )
             return
 
-        logger.info("正在更新表情包数据...")
+        yield event.plain_result("正在更新表情包数据，请稍候...")
 
         os.makedirs(updater._meme_data_dir, exist_ok=True)
 
@@ -564,8 +576,10 @@ async def update_memes(updater, event: AstrMessageEvent):
             else logger.info
         )
         log("\n".join(summary_lines))
+        yield event.plain_result("\n".join(_maintenance_reply_lines(summary_lines)))
     except Exception:
         logger.exception("表情更新失败")
+        yield event.plain_result("表情更新失败。")
     finally:
         updater._stop_event(event)
 
@@ -616,12 +630,10 @@ async def meme_status(updater, event: AstrMessageEvent):
 
     try:
         count = await updater._refresh_meme_infos()
-        lines.append(
-            f"meme API: 已加载 {count} 个表情 | {updater.plugin_config.meme_api_base_url()}"
-        )
+        lines.append(f"meme API: 已加载 {count} 个表情")
     except Exception:
         logger.exception("查询 meme API 状态失败")
-        lines.append("meme API: 暂不可用")
+        lines.append("meme API: 无法连接或加载失败")
 
     yield event.plain_result("\n".join(lines))
 
@@ -636,7 +648,7 @@ async def refresh_meme_infos(updater, event: AstrMessageEvent):
     updater._stop_event(event)
     task = updater._meme_info_refresh_task
     if task and not task.done():
-        logger.info("meme API 表情信息仍在后台加载中。")
+        yield event.plain_result("meme API 表情信息仍在后台加载中，请稍后再试。")
         return
     if task and task.done():
         try:
@@ -647,9 +659,10 @@ async def refresh_meme_infos(updater, event: AstrMessageEvent):
     updater._meme_info_refresh_task = task
     try:
         count = await task
-        logger.info(f"表情信息刷新完成，共载入 {count} 个表情。")
+        yield event.plain_result(f"表情信息刷新完成，共载入 {count} 个表情。")
     except Exception:
         logger.exception("刷新表情信息失败")
+        yield event.plain_result("刷新表情信息失败。")
     finally:
         if updater._meme_info_refresh_task is task:
             updater._meme_info_refresh_task = None
@@ -882,6 +895,7 @@ async def meme_search(updater, event: AstrMessageEvent):
         yield event.plain_result(result_text)
     except Exception:
         logger.exception("搜索表情失败")
+        yield event.plain_result("搜索表情失败。")
 
 
 async def meme_list(updater, event: AstrMessageEvent):
@@ -913,6 +927,7 @@ async def meme_list(updater, event: AstrMessageEvent):
         yield event.plain_result(result_text)
     except Exception:
         logger.exception("获取表情列表失败")
+        yield event.plain_result("获取表情列表失败。")
     finally:
         updater._stop_event(event)
 
@@ -975,11 +990,18 @@ async def meme_info(updater, event: AstrMessageEvent):
                 f"表情详情预览图获取失败，已降级为纯文本详情："
                 f"表情={info.get('key')}，meme API={base_url}，原因={e}"
             )
+            lines.extend(
+                [
+                    "",
+                    "预览图：获取失败，请检查 meme API 服务或反向代理配置。",
+                ]
+            )
             yield event.plain_result("\n".join(lines))
             return
         yield event.chain_result(components)
     except Exception:
         logger.exception("获取表情详情失败")
+        yield event.plain_result("获取表情详情失败。")
 
 
 async def _yield_and_stop(updater, event: AstrMessageEvent, result):
@@ -1063,8 +1085,10 @@ async def meme_generate(updater, event: AstrMessageEvent):
             yield result
     except ArgSyntaxError as e:
         logger.warning(f"制作表情参数解析失败：{e}")
+        yield event.plain_result(str(e))
     except Exception:
         logger.exception("制作表情失败")
+        yield event.plain_result("制作表情失败。")
 
 
 async def _resolve_generate_args(
@@ -1343,8 +1367,12 @@ async def _random_meme_results(
                 logger.debug(f"随机表情渲染跳过 {info.get('key')}: {e}")
                 continue
         yield event.plain_result("没有找到适合当前参数的表情。")
+    except ArgSyntaxError as e:
+        logger.warning(f"随机表情参数解析失败：{e}")
+        yield event.plain_result(f"随机表情失败：{e}")
     except Exception:
         logger.exception("随机表情失败")
+        yield event.plain_result("随机表情失败。")
 
 
 async def meme_poke_random_listener(updater, event: AstrMessageEvent):

@@ -357,7 +357,8 @@ class MemeUpdater(Star):
                 return
             except Exception as e:
                 if attempt == attempts - 1:
-                    lines.append(f"❌ 刷新表情信息失败，已达最大尝试次数：{e}")
+                    logger.exception("重启后刷新表情信息失败，已达最大尝试次数")
+                    lines.append("❌ 刷新表情信息失败，已达最大尝试次数。")
                 else:
                     lines.append(
                         f"⏳ 刷新表情信息失败，等待重试 ({attempt + 1}/{attempts})..."
@@ -444,6 +445,7 @@ class MemeUpdater(Star):
         except Exception:
             logger.exception("执行表情指令失败")
             self._stop_event(event)
+            yield event.plain_result("表情指令执行失败，请稍后重试。")
 
     # Command implementation stubs
 
