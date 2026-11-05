@@ -30,8 +30,8 @@
     "default": 4
   },
   "meme_refresh_verbose_log": {
-    "description": "显示详细刷新日志",
-    "hint": "关闭时只输出开始、总数和完成日志；开启后输出每个表情的获取进度。",
+    "description": "记录详细后台刷新日志",
+    "hint": "仅记录到 AstrBot 后台日志，不发送到聊天；关闭时记录开始、总数和完成日志，开启后还记录每个表情的获取进度。",
     "type": "bool",
     "default": false
   },

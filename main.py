@@ -187,7 +187,7 @@ class AdminOrGroupAdminFilter(CustomFilter):
     "astrbot_plugin_meme_api_python",
     "表情包数据更新与生成插件",
     "xiaoruange39",
-    "0.3.5",
+    "0.3.6",
 )
 class MemeUpdater(Star):
     """The main plugin controller for managing and rendering meme packages."""
@@ -433,6 +433,18 @@ class MemeUpdater(Star):
 
         return await web_delete_disabled_meme(self)
 
+    async def _run_command(self, event: AstrMessageEvent, results):
+        """Keep command exceptions in backend logs instead of chat replies."""
+        try:
+            if asyncio.iscoroutine(results):
+                await results
+            else:
+                async for result in results:
+                    yield result
+        except Exception:
+            logger.exception("执行表情指令失败")
+            self._stop_event(event)
+
     # Command implementation stubs
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -440,7 +452,7 @@ class MemeUpdater(Star):
     async def restart_memeapi(self, event: AstrMessageEvent):
         from .src.commands import restart_memeapi
 
-        async for res in restart_memeapi(self, event):
+        async for res in self._run_command(event, restart_memeapi(self, event)):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -448,7 +460,7 @@ class MemeUpdater(Star):
     async def update_memes(self, event: AstrMessageEvent):
         from .src.commands import update_memes as update_memes_command
 
-        async for res in update_memes_command(self, event):
+        async for res in self._run_command(event, update_memes_command(self, event)):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -456,21 +468,21 @@ class MemeUpdater(Star):
     async def update_memes_alias(self, event: AstrMessageEvent):
         from .src.commands import update_memes as update_memes_command
 
-        async for res in update_memes_command(self, event):
+        async for res in self._run_command(event, update_memes_command(self, event)):
             yield res
 
     @filter.command("meme帮助")
     async def meme_help(self, event: AstrMessageEvent):
         from .src.commands import meme_help as meme_help_command
 
-        async for res in meme_help_command(self, event):
+        async for res in self._run_command(event, meme_help_command(self, event)):
             yield res
 
     @filter.command("表情帮助")
     async def meme_help_alias(self, event: AstrMessageEvent):
         from .src.commands import meme_help as meme_help_command
 
-        async for res in meme_help_command(self, event):
+        async for res in self._run_command(event, meme_help_command(self, event)):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -478,7 +490,7 @@ class MemeUpdater(Star):
     async def meme_status(self, event: AstrMessageEvent):
         from .src.commands import meme_status
 
-        async for res in meme_status(self, event):
+        async for res in self._run_command(event, meme_status(self, event)):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -486,7 +498,7 @@ class MemeUpdater(Star):
     async def refresh_meme_infos(self, event: AstrMessageEvent):
         from .src.commands import refresh_meme_infos
 
-        async for res in refresh_meme_infos(self, event):
+        async for res in self._run_command(event, refresh_meme_infos(self, event)):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -494,7 +506,9 @@ class MemeUpdater(Star):
     async def disable_meme(self, event: AstrMessageEvent):
         from .src.commands import set_meme_disabled
 
-        async for res in set_meme_disabled(self, event, "屏蔽表情"):
+        async for res in self._run_command(
+            event, set_meme_disabled(self, event, "屏蔽表情")
+        ):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -502,7 +516,9 @@ class MemeUpdater(Star):
     async def enable_meme(self, event: AstrMessageEvent):
         from .src.commands import unset_meme_disabled
 
-        async for res in unset_meme_disabled(self, event, "取消屏蔽表情"):
+        async for res in self._run_command(
+            event, unset_meme_disabled(self, event, "取消屏蔽表情")
+        ):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -510,8 +526,11 @@ class MemeUpdater(Star):
     async def disable_meme_globally(self, event: AstrMessageEvent):
         from .src.commands import set_meme_disabled
 
-        async for res in set_meme_disabled(
-            self, event, "全局屏蔽表情", force_global=True
+        async for res in self._run_command(
+            event,
+            set_meme_disabled(
+                self, event, "全局屏蔽表情", force_global=True
+            ),
         ):
             yield res
 
@@ -520,8 +539,11 @@ class MemeUpdater(Star):
     async def enable_meme_globally(self, event: AstrMessageEvent):
         from .src.commands import unset_meme_disabled
 
-        async for res in unset_meme_disabled(
-            self, event, "取消全局屏蔽表情", force_global=True
+        async for res in self._run_command(
+            event,
+            unset_meme_disabled(
+                self, event, "取消全局屏蔽表情", force_global=True
+            ),
         ):
             yield res
 
@@ -532,7 +554,9 @@ class MemeUpdater(Star):
 
         args = self._get_message_args(event, "屏蔽表情列表")
         group_id = self._block_list_scope_from_args(event, args)
-        async for res in list_disabled_memes(self, event, group_id):
+        async for res in self._run_command(
+            event, list_disabled_memes(self, event, group_id)
+        ):
             yield res
 
     @filter.custom_filter(AdminOrGroupAdminFilter)
@@ -540,49 +564,49 @@ class MemeUpdater(Star):
     async def list_global_disabled_memes(self, event: AstrMessageEvent):
         from .src.commands import list_disabled_memes
 
-        async for res in list_disabled_memes(self, event, ""):
+        async for res in self._run_command(event, list_disabled_memes(self, event, "")):
             yield res
 
     @filter.command("表情统计")
     async def meme_usage_stats(self, event: AstrMessageEvent):
         from .src.commands import meme_usage_stats
 
-        async for res in meme_usage_stats(self, event):
+        async for res in self._run_command(event, meme_usage_stats(self, event)):
             yield res
 
     @filter.command("总表情统计")
     async def meme_global_usage_stats(self, event: AstrMessageEvent):
         from .src.commands import meme_global_usage_stats
 
-        async for res in meme_global_usage_stats(self, event):
+        async for res in self._run_command(event, meme_global_usage_stats(self, event)):
             yield res
 
     @filter.command("meme搜索")
     async def meme_search(self, event: AstrMessageEvent):
         from .src.commands import meme_search
 
-        async for res in meme_search(self, event):
+        async for res in self._run_command(event, meme_search(self, event)):
             yield res
 
     @filter.command("表情列表")
     async def meme_list(self, event: AstrMessageEvent):
         from .src.commands import meme_list
 
-        async for res in meme_list(self, event):
+        async for res in self._run_command(event, meme_list(self, event)):
             yield res
 
     @filter.command("表情详情")
     async def meme_info(self, event: AstrMessageEvent):
         from .src.commands import meme_info
 
-        async for res in meme_info(self, event):
+        async for res in self._run_command(event, meme_info(self, event)):
             yield res
 
     @filter.command("制作表情")
     async def meme_generate(self, event: AstrMessageEvent):
         from .src.commands import meme_generate
 
-        async for res in meme_generate(self, event):
+        async for res in self._run_command(event, meme_generate(self, event)):
             yield res
 
     @filter.llm_tool(name="meme_get_random_candidates")
@@ -668,14 +692,16 @@ class MemeUpdater(Star):
     async def meme_poke_random_listener(self, event: AstrMessageEvent):
         from .src.commands import meme_poke_random_listener
 
-        async for res in meme_poke_random_listener(self, event):
+        async for res in self._run_command(
+            event, meme_poke_random_listener(self, event)
+        ):
             yield res
 
     @filter.event_message_type(EventMessageType.ALL)
     async def meme_shortcut_listener(self, event: AstrMessageEvent):
         from .src.commands import meme_shortcut_listener
 
-        async for res in meme_shortcut_listener(self, event):
+        async for res in self._run_command(event, meme_shortcut_listener(self, event)):
             yield res
 
     # Metadata & Config Helpers
